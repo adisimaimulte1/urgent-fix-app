@@ -41,7 +41,7 @@ const LUCIDE_ALERT_PATH := "res://addons/lucide_icons/icons_png/alert-triangle_5
 const LUCIDE_CALENDAR_PATH := "res://addons/lucide_icons/icons_png/calendar_512.png"
 const LUCIDE_CALENDAR_DAYS_PATH := "res://addons/lucide_icons/icons_png/calendar-days_512.png"
 const LUCIDE_CAMERA_PATH := "res://addons/lucide_icons/icons_png/camera_512.png"
-const LUCIDE_VIDEO_PATH := "res://addons/lucide_icons/icons_png/video_512.png"
+const LUCIDE_GALLERY_PATH := "res://addons/lucide_icons/icons_png/image_512.png"
 const LUCIDE_X_PATH := "res://addons/lucide_icons/icons_png/x_512.png"
 
 const UF_ACTION_BUTTON_SCRIPT := preload("res://app/scripts/ui/UFActionButton.gd")
@@ -84,6 +84,12 @@ var _native_camera_preview: TextureRect
 var _native_camera_image_texture: ImageTexture
 var _native_camera_last_image: Image
 var _native_camera_streaming := false
+var _native_camera_mode := "photo"
+var _native_video_recording := false
+var _native_video_started_msec := 0
+var _native_video_timer: Timer
+var _native_video_status_label: Label
+var _native_video_record_button: Button
 var _description_counter: Label
 var _saved_requests: Array = []
 var _permission_notice_overlay: Control
@@ -288,26 +294,58 @@ func _load_texture(path: String) -> Texture2D:
 		return resource
 	return null
 
-func _open_file_picker(kind: String) -> void:
-	if kind == "photo":
-		_show_small_notice("Camera indisponibilă", "Camera nu a putut fi pornită. Nu deschid selectorul de fișiere ca fallback.")
-		return
-	if is_instance_valid(_file_dialog):
-		_file_dialog.queue_free()
-	_file_dialog = FileDialog.new()
-	_file_dialog.access = FileDialog.ACCESS_FILESYSTEM
-	_file_dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILE
-	_file_dialog.title = "Alege un video"
-	_file_dialog.size = Vector2i(_dp(330), _dp(520))
-	_file_dialog.position = Vector2i(maxi(0, int((get_viewport_rect().size.x - _dp(330)) * 0.5)), maxi(0, int((get_viewport_rect().size.y - _dp(520)) * 0.5)))
-	_file_dialog.filters = PackedStringArray(["*.mp4,*.mov,*.webm,*.avi ; Video"])
-	_file_dialog.file_selected.connect(func(path: String) -> void:
-		var saved := _copy_file_to_local(path, kind)
-		if saved != "":
-			_add_media_item(saved, kind)
+func _open_gallery_picker() -> void:
+	var filters := PackedStringArray([
+		"*.png,*.jpg,*.jpeg,*.webp,*.bmp ; Imagini"
+	])
+
+	print("UrgentFix gallery picker: opening native file dialog")
+	DisplayServer.file_dialog_show(
+		"Alege o poză",
+		"",
+		"",
+		false,
+		DisplayServer.FILE_DIALOG_MODE_OPEN_FILE,
+		filters,
+		Callable(self, "_on_gallery_picker_selected")
 	)
-	add_child(_file_dialog)
-	_file_dialog.popup()
+
+func _on_gallery_picker_selected(status: bool, selected_paths: PackedStringArray, _selected_filter_index: int) -> void:
+	if not status or selected_paths.is_empty():
+		return
+
+	var source_path := selected_paths[0]
+	var saved := _copy_gallery_photo_to_local(source_path)
+	if saved != "":
+		_add_media_item(saved, "photo")
+	else:
+		_show_small_notice(
+			"Galerie",
+			"Poza selectată nu a putut fi citită. Încearcă altă imagine din galerie."
+		)
+
+func _copy_gallery_photo_to_local(source_path: String) -> String:
+	if source_path.strip_edges() == "":
+		return ""
+
+	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(LOCAL_MEDIA_DIR))
+	var target := "%s/gallery_photo_%d.png" % [LOCAL_MEDIA_DIR, Time.get_unix_time_from_system()]
+
+	var img := Image.new()
+	var load_error := img.load(source_path)
+	if load_error == OK and not img.is_empty():
+		return target if img.save_png(target) == OK else ""
+
+	var bytes := FileAccess.get_file_as_bytes(source_path)
+	if bytes.is_empty():
+		return ""
+
+	var file := FileAccess.open(target, FileAccess.WRITE)
+	if file == null:
+		return ""
+
+	file.store_buffer(bytes)
+	return target
 
 func _request_camera_permission_if_possible() -> bool:
 	if OS.has_method("request_permission"):
@@ -319,20 +357,39 @@ func _request_camera_permission_if_possible() -> bool:
 	return true
 
 func _open_camera_capture() -> void:
+	_native_camera_mode = "photo"
+	_open_native_camera_flow()
+
+func _open_native_camera_flow() -> void:
+	_print_native_camera_debug("%s_button_pressed" % _native_camera_mode)
+
 	var native_camera := _get_native_camera_node()
 	if native_camera == null:
 		_show_small_notice(
-			"Camera indisponibilă",
-			"Pluginul NativeCamera nu este disponibil în proiect. Verifică dacă Android Native Camera Plugin este instalat și activat."
+			"Camera debug",
+			"Nu am putut crea nodul NativeCamera.\n\n" + _native_camera_debug_report("native_camera_node_null")
+		)
+		return
+
+	if not _has_any_native_camera_singleton():
+		_show_small_notice(
+			"NativeCamera singleton lipsă",
+			"Wrapper-ul există, dar Android singleton-ul pluginului nu este încărcat.\n\n" + _native_camera_debug_report("singleton_missing")
 		)
 		return
 
 	_show_native_camera_overlay()
+
 	if native_camera.has_method("has_camera_permission") and not bool(native_camera.call("has_camera_permission")):
 		if native_camera.has_method("request_camera_permission"):
+			print("NativeCamera: requesting Android camera permission...")
 			native_camera.call("request_camera_permission")
 		else:
-			_show_small_notice("Permisiune necesară", "Pluginul nu poate cere permisiunea pentru cameră.")
+			_close_camera_capture(true)
+			_show_small_notice(
+				"Permisiune necesară",
+				"Pluginul există, dar wrapper-ul nu are request_camera_permission().\n\n" + _native_camera_debug_report("missing_request_permission_method")
+			)
 		return
 
 	_start_native_camera_stream()
@@ -341,28 +398,41 @@ func _get_native_camera_node() -> Node:
 	if is_instance_valid(_native_camera):
 		return _native_camera
 
+	_print_native_camera_debug("get_native_camera_node_start")
+
 	var camera_node: Node = null
 	if ClassDB.class_exists("NativeCamera"):
 		var created: Variant = ClassDB.instantiate("NativeCamera")
 		if created is Node:
 			camera_node = created
+			print("NativeCamera: created wrapper from ClassDB NativeCamera.")
+		else:
+			print("NativeCamera: ClassDB NativeCamera exists, but instantiate() did not return Node: ", created)
+	else:
+		print("NativeCamera: ClassDB class NativeCamera does not exist. Trying script paths...")
 
 	if camera_node == null:
 		var candidate_paths := PackedStringArray([
+			"res://addons/NativeCameraPlugin/NativeCamera.gd",
 			"res://addon/src/main/NativeCamera.gd",
 			"res://addons/native_camera/src/main/NativeCamera.gd",
 			"res://addons/native_camera/NativeCamera.gd",
 			"res://addons/NativeCamera/NativeCamera.gd"
 		])
 		for path in candidate_paths:
+			print("NativeCamera: checking wrapper path: ", path, " exists=", ResourceLoader.exists(path))
 			if ResourceLoader.exists(path):
 				var script_resource: Variant = load(path)
 				if script_resource is Script:
 					camera_node = Node.new()
 					camera_node.set_script(script_resource)
+					print("NativeCamera: created wrapper from script path: ", path)
 					break
+				else:
+					print("NativeCamera: path exists but is not Script: ", path)
 
 	if camera_node == null:
+		print("NativeCamera: failed to create wrapper node.")
 		return null
 
 	camera_node.name = "UrgentFixNativeCamera"
@@ -373,6 +443,7 @@ func _get_native_camera_node() -> Node:
 	_connect_native_camera_signal("camera_permission_denied", Callable(self, "_on_native_camera_permission_denied"))
 	_connect_native_camera_signal("frame_available", Callable(self, "_on_native_camera_frame_available"))
 
+	_print_native_camera_debug("get_native_camera_node_end")
 	return _native_camera
 
 func _connect_native_camera_signal(signal_name: StringName, callable: Callable) -> void:
@@ -380,12 +451,59 @@ func _connect_native_camera_signal(signal_name: StringName, callable: Callable) 
 		return
 	if _native_camera.has_signal(signal_name) and not _native_camera.is_connected(signal_name, callable):
 		_native_camera.connect(signal_name, callable)
+		print("NativeCamera: connected signal: ", signal_name)
+	else:
+		print("NativeCamera: signal not available or already connected: ", signal_name)
+
+func _has_any_native_camera_singleton() -> bool:
+	var singleton_names := PackedStringArray([
+		"NativeCameraPlugin",
+		"NativeCamera",
+		"GodotNativeCamera"
+	])
+	for singleton_name in singleton_names:
+		if Engine.has_singleton(singleton_name):
+			return true
+	return false
+
+func _native_camera_debug_report(context: String) -> String:
+	var lines := PackedStringArray()
+	lines.append("Context: " + context)
+	lines.append("OS: " + OS.get_name())
+	lines.append("ClassDB NativeCamera: " + str(ClassDB.class_exists("NativeCamera")))
+	lines.append("Has NativeCameraPlugin singleton: " + str(Engine.has_singleton("NativeCameraPlugin")))
+	lines.append("Has NativeCamera singleton: " + str(Engine.has_singleton("NativeCamera")))
+	lines.append("Has GodotNativeCamera singleton: " + str(Engine.has_singleton("GodotNativeCamera")))
+	lines.append("Wrapper path exists: " + str(ResourceLoader.exists("res://addons/NativeCameraPlugin/NativeCamera.gd")))
+	lines.append("Debug AAR path exists: " + str(FileAccess.file_exists("res://addons/NativeCameraPlugin/bin/debug/NativeCameraPlugin-debug.aar")))
+	lines.append("Release AAR path exists: " + str(FileAccess.file_exists("res://addons/NativeCameraPlugin/bin/release/NativeCameraPlugin-release.aar")))
+	if is_instance_valid(_native_camera):
+		lines.append("Wrapper node valid: true")
+		lines.append("Wrapper has has_camera_permission(): " + str(_native_camera.has_method("has_camera_permission")))
+		lines.append("Wrapper has request_camera_permission(): " + str(_native_camera.has_method("request_camera_permission")))
+		lines.append("Wrapper has get_all_cameras(): " + str(_native_camera.has_method("get_all_cameras")))
+		lines.append("Wrapper has start(): " + str(_native_camera.has_method("start")))
+	else:
+		lines.append("Wrapper node valid: false")
+	lines.append("All singletons: " + str(Engine.get_singleton_list()))
+	return "\n".join(lines)
+
+func _print_native_camera_debug(context: String) -> void:
+	print("")
+	print("========== URGENTFIX NATIVE CAMERA DEBUG ==========")
+	print(_native_camera_debug_report(context))
+	print("===================================================")
+	print("")
 
 func _show_native_camera_overlay() -> void:
 	_close_camera_capture(true)
 
 	_native_camera_last_image = null
 	_native_camera_image_texture = null
+	_native_video_recording = false
+	_native_video_started_msec = 0
+	_native_video_status_label = null
+	_native_video_record_button = null
 
 	_native_camera_overlay = Control.new()
 	_native_camera_overlay.name = "NativeCameraOverlay"
@@ -424,7 +542,8 @@ func _show_native_camera_overlay() -> void:
 	box.add_theme_constant_override("separation", _dp(12))
 	margin.add_child(box)
 
-	var title := _headline("Fă o poză", 20)
+	var title_text := "Fă o poză"
+	var title := _headline(title_text, 20)
 	box.add_child(title)
 
 	var preview_shell := PanelContainer.new()
@@ -447,6 +566,7 @@ func _show_native_camera_overlay() -> void:
 	hint.add_theme_color_override("font_color", Color.WHITE)
 	preview_shell.add_child(hint)
 
+
 	var row := HBoxContainer.new()
 	row.add_theme_constant_override("separation", _dp(10))
 	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -455,11 +575,17 @@ func _show_native_camera_overlay() -> void:
 	var cancel := _secondary_button("Renunță", func() -> void:
 		_close_camera_capture(true)
 	)
+	cancel.icon_texture = null
+	cancel.arrow_texture = null
+	cancel.icon_kind = "none"
 	row.add_child(cancel)
 
 	var snap := _primary_button("Capturează", func() -> void:
 		_capture_native_camera_photo()
 	)
+	snap.icon_texture = null
+	snap.arrow_texture = null
+	snap.icon_kind = "none"
 	row.add_child(snap)
 
 	panel.scale = Vector2(0.94, 0.94)
@@ -581,6 +707,84 @@ func _on_native_camera_frame_available(frame_info: Variant) -> void:
 		if loading != null:
 			loading.visible = false
 
+func _toggle_native_video_recording() -> void:
+	if _native_video_recording:
+		_finish_native_video_recording()
+		return
+
+	if _native_camera_last_image == null or _native_camera_last_image.is_empty():
+		_show_small_notice("Camera pornește", "Așteaptă să apară imaginea, apoi încearcă din nou.")
+		return
+
+	_native_video_recording = true
+	_native_video_started_msec = Time.get_ticks_msec()
+	if is_instance_valid(_native_video_record_button):
+		_native_video_record_button.text = "Oprește"
+	if is_instance_valid(_native_video_status_label):
+		_native_video_status_label.text = "Se înregistrează... 0/20s"
+
+	if is_instance_valid(_native_video_timer):
+		_native_video_timer.queue_free()
+	_native_video_timer = Timer.new()
+	_native_video_timer.wait_time = 0.2
+	_native_video_timer.one_shot = false
+	_native_video_timer.timeout.connect(_update_native_video_recording_timer)
+	add_child(_native_video_timer)
+	_native_video_timer.start()
+
+func _update_native_video_recording_timer() -> void:
+	if not _native_video_recording:
+		return
+	var elapsed := float(Time.get_ticks_msec() - _native_video_started_msec) / 1000.0
+	var shown := mini(20, int(floor(elapsed)))
+	if is_instance_valid(_native_video_status_label):
+		_native_video_status_label.text = "Se înregistrează... %d/20s" % shown
+	if elapsed >= 20.0:
+		_finish_native_video_recording()
+
+func _finish_native_video_recording() -> void:
+	if not _native_video_recording:
+		return
+	_native_video_recording = false
+	if is_instance_valid(_native_video_timer):
+		_native_video_timer.stop()
+		_native_video_timer.queue_free()
+	_native_video_timer = null
+
+	if _native_camera_last_image == null or _native_camera_last_image.is_empty():
+		_close_camera_capture(true)
+		_show_small_notice("Video invalid", "Camera nu a trimis niciun cadru valid.")
+		return
+
+	var elapsed := clampf(float(Time.get_ticks_msec() - _native_video_started_msec) / 1000.0, 0.1, 20.0)
+	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(LOCAL_MEDIA_DIR))
+	var stamp := int(Time.get_unix_time_from_system())
+	var thumb_path := "%s/video_thumb_%d.png" % [LOCAL_MEDIA_DIR, stamp]
+	var meta_path := "%s/video_%d.json" % [LOCAL_MEDIA_DIR, stamp]
+	var save_error := _native_camera_last_image.save_png(thumb_path)
+	if save_error != OK:
+		_close_camera_capture(true)
+		_show_small_notice("Eroare salvare", "Preview-ul video nu a putut fi salvat local.")
+		return
+
+	var file := FileAccess.open(meta_path, FileAccess.WRITE)
+	if file == null:
+		_close_camera_capture(true)
+		_show_small_notice("Eroare salvare", "Fișierul video local nu a putut fi creat.")
+		return
+
+	file.store_string(JSON.stringify({
+		"kind": "video",
+		"duration_seconds": elapsed,
+		"max_seconds": 20,
+		"thumbnail": thumb_path,
+		"created_at": Time.get_datetime_string_from_system(),
+		"note": "NativeCameraPlugin streams frames only; this app stores a local video capture manifest plus thumbnail."
+	}, "\t"))
+
+	_close_camera_capture(true)
+	_add_media_item(meta_path, "video")
+
 func _capture_native_camera_photo() -> void:
 	if _native_camera_last_image == null or _native_camera_last_image.is_empty():
 		_show_small_notice("Camera pornește", "Așteaptă o secundă să apară imaginea, apoi încearcă din nou.")
@@ -597,6 +801,12 @@ func _capture_native_camera_photo() -> void:
 		_show_small_notice("Eroare salvare", "Poza a fost capturată, dar nu a putut fi salvată local.")
 
 func _close_camera_capture(close_overlay: bool = true) -> void:
+	_native_video_recording = false
+	if is_instance_valid(_native_video_timer):
+		_native_video_timer.stop()
+		_native_video_timer.queue_free()
+	_native_video_timer = null
+
 	if is_instance_valid(_native_camera) and _native_camera_streaming and _native_camera.has_method("stop"):
 		_native_camera.call("stop")
 	_native_camera_streaming = false
@@ -1091,10 +1301,11 @@ func _other_issue_input() -> TextEdit:
 	return edit
 
 func _media() -> void:
-	_title.text = "UrgentFix"
+	_title.text = ""
 	var box := _page_scroll()
 	box.add_theme_constant_override("separation", _dp(9))
-	box.add_child(_headline("Adaugă poze sau video", 22))
+	box.add_child(_compact_logo_block())
+	box.add_child(_headline("Adaugă poze", 22))
 	box.add_child(_center_text("Arată-ne problema pentru un\ndiagnostic mai rapid.", 12))
 
 	var row := HBoxContainer.new()
@@ -1108,10 +1319,10 @@ func _media() -> void:
 		_open_camera_capture()
 	)
 
-	var video_button := _upload_card("Încarcă video", LUCIDE_VIDEO_PATH)
-	row.add_child(video_button)
-	video_button.pressed.connect(func() -> void:
-		_open_file_picker("video")
+	var gallery_button := _upload_card("Din galerie", LUCIDE_GALLERY_PATH)
+	row.add_child(gallery_button)
+	gallery_button.pressed.connect(func() -> void:
+		_open_gallery_picker()
 	)
 
 	box.add_child(_media_preview_stack())
@@ -1124,28 +1335,28 @@ func _media() -> void:
 	var desc_margin := MarginContainer.new()
 	desc_margin.add_theme_constant_override("margin_left", _dp(12))
 	desc_margin.add_theme_constant_override("margin_right", _dp(12))
-	desc_margin.add_theme_constant_override("margin_top", _dp(9))
-	desc_margin.add_theme_constant_override("margin_bottom", _dp(8))
+	desc_margin.add_theme_constant_override("margin_top", _dp(10))
+	desc_margin.add_theme_constant_override("margin_bottom", _dp(9))
 	desc_panel.add_child(desc_margin)
 
 	var desc_box := VBoxContainer.new()
-	desc_box.add_theme_constant_override("separation", _dp(5))
+	desc_box.add_theme_constant_override("separation", _dp(6))
 	desc_margin.add_child(desc_box)
 
 	var desc_title := _section("Descrie problema")
-	desc_title.add_theme_font_size_override("font_size", _sp(11))
+	desc_title.add_theme_font_size_override("font_size", _sp(14))
 	desc_box.add_child(desc_title)
 
 	var edit := TextEdit.new()
 	edit.text = str(_form_data.get("description", ""))
 	edit.placeholder_text = "Ex: Țeava de sub chiuvetă curge și udă dulapul..."
-	edit.custom_minimum_size.y = _dp(54)
+	edit.custom_minimum_size.y = _dp(58)
 	edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	edit.wrap_mode = TextEdit.LINE_WRAPPING_BOUNDARY
 	edit.scroll_fit_content_height = false
 	edit.focus_mode = Control.FOCUS_CLICK
 	edit.mouse_filter = Control.MOUSE_FILTER_STOP
-	_apply_font(edit, 11)
+	_apply_font(edit, 12)
 	edit.add_theme_color_override("font_color", TEXT)
 	edit.add_theme_color_override("font_placeholder_color", Color("#8AA0BB"))
 	edit.add_theme_color_override("caret_color", BLUE)
@@ -1173,11 +1384,21 @@ func _media() -> void:
 			_description_counter.text = "%d/250" % edit.text.length()
 	)
 
-	box.add_child(_small_note("ⓘ  Poți adăuga până la 3 fișiere"))
+	box.add_child(_media_limit_note())
 	var finalize_button := _primary_button("Finalizează", func(): _finalize_request())
 	box.add_child(finalize_button)
 	_update_media_finalize_state(finalize_button)
 	box.add_child(_gap(54))
+
+func _media_limit_note() -> Label:
+	var note := _small_note("ⓘ  Poți adăuga până la 3 poze")
+	note.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	note.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	note.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_apply_font(note, 16)
+	note.add_theme_color_override("font_color", MUTED)
+	return note
+
 
 func _update_media_finalize_state(button: Button) -> void:
 	if not is_instance_valid(button):
@@ -1768,26 +1989,41 @@ func _mini_chip(t: String, icon_path: String) -> PanelContainer:
 func _upload_card(t: String, icon_path: String = "") -> Button:
 	var b := Button.new()
 	b.text = t
-	b.custom_minimum_size.y = _dp(86)
+	b.custom_minimum_size.y = _dp(94)
 	b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	b.expand_icon = false
-	if icon_path != "" and ResourceLoader.exists(icon_path):
-		b.icon = load(icon_path)
-		b.icon_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		b.vertical_icon_alignment = VERTICAL_ALIGNMENT_TOP
-		b.add_theme_constant_override("icon_max_width", _dp(30))
-		b.add_theme_color_override("icon_normal_color", TEAL if t.begins_with("Fă") else Color("#3D78FF"))
-		b.add_theme_color_override("icon_hover_color", TEAL if t.begins_with("Fă") else Color("#3D78FF"))
-		b.add_theme_color_override("icon_pressed_color", TEAL if t.begins_with("Fă") else Color("#3D78FF"))
-	_apply_font(b, 12)
+	b.alignment = HORIZONTAL_ALIGNMENT_CENTER
+	b.icon_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	b.vertical_icon_alignment = VERTICAL_ALIGNMENT_TOP
+	b.texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR
+	b.add_theme_constant_override("h_separation", _dp(7))
+	b.add_theme_constant_override("icon_max_width", _dp(56))
+
+	var icon_texture := _load_texture(icon_path)
+	if icon_texture != null:
+		b.icon = icon_texture
+	else:
+		push_warning("Upload icon missing: %s" % icon_path)
+
+	var accent := TEAL if t.begins_with("Fă") else Color("#3D78FF")
+	b.add_theme_color_override("icon_normal_color", accent)
+	b.add_theme_color_override("icon_hover_color", accent)
+	b.add_theme_color_override("icon_pressed_color", accent)
+	b.add_theme_color_override("icon_focus_color", accent)
+	b.add_theme_color_override("icon_disabled_color", accent)
+
+	_apply_font(b, 13)
 	b.add_theme_color_override("font_color", TEXT)
 	b.add_theme_color_override("font_hover_color", TEXT)
 	b.add_theme_color_override("font_pressed_color", TEXT)
+	b.add_theme_color_override("font_focus_color", TEXT)
 	b.add_theme_stylebox_override("normal", _style(CARD, BORDER, 12, 1))
 	b.add_theme_stylebox_override("hover", _style(CARD, TEAL, 12, 2))
 	b.add_theme_stylebox_override("pressed", _style(CARD, BLUE, 12, 2))
+	b.add_theme_stylebox_override("focus", _style(CARD, TEAL, 12, 2))
 	_make_bouncy(b)
 	return b
+
 
 func _media_preview_stack() -> VBoxContainer:
 	var stack := VBoxContainer.new()
@@ -1803,6 +2039,18 @@ func _media_preview_stack() -> VBoxContainer:
 		var item: Variant = media[i]
 		stack.add_child(_media_preview_card(_media_path_from_item(item), _media_kind_from_item(item), i))
 	return stack
+
+func _video_thumbnail_from_metadata(path: String) -> Texture2D:
+	if path.strip_edges() == "" or not FileAccess.file_exists(path):
+		return null
+	var file := FileAccess.open(path, FileAccess.READ)
+	if file == null:
+		return null
+	var parsed: Variant = JSON.parse_string(file.get_as_text())
+	if not (parsed is Dictionary):
+		return null
+	var thumb_path := str((parsed as Dictionary).get("thumbnail", ""))
+	return _texture_from_path(thumb_path)
 
 func _media_preview_card(path: String, kind: String, index: int) -> Control:
 	var preview_wrap := Control.new()
@@ -1827,31 +2075,37 @@ func _media_preview_card(path: String, kind: String, index: int) -> Control:
 		else:
 			panel.add_child(_missing_media_label("Imaginea nu mai există"))
 	else:
-		panel.add_child(_missing_media_label("Video salvat local"))
+		var thumb := _video_thumbnail_from_metadata(path)
+		if thumb != null:
+			var img := TextureRect.new()
+			img.set_anchors_preset(Control.PRESET_FULL_RECT)
+			img.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+			img.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
+			img.texture = thumb
+			img.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			panel.add_child(img)
+		else:
+			panel.add_child(_missing_media_label("Imaginea nu mai există"))
 
-	var action := UF_ICON_CIRCLE_BUTTON_SCRIPT.new()
-	action.icon_texture = _load_texture(LUCIDE_X_PATH)
-	action.icon_color = BLUE
-	action.circle_color = Color.WHITE
-	action.icon_scale = 0.46
-	action.circle_ratio = 1.0
-	action.custom_minimum_size = Vector2(_dp(36), _dp(36))
-	action.position = Vector2(_content_width() - _dp(44), _dp(8))
-	action.z_index = 50
-	action.add_theme_stylebox_override("normal", _transparent_style())
-	action.add_theme_stylebox_override("hover", _transparent_style())
-	action.add_theme_stylebox_override("pressed", _transparent_style())
-	action.add_theme_stylebox_override("focus", _transparent_style())
-	if index < 0:
-		action.pressed.connect(func() -> void:
-			_open_camera_capture()
-		)
-	else:
+	if index >= 0:
+		var action := UF_ICON_CIRCLE_BUTTON_SCRIPT.new()
+		action.icon_texture = _load_texture(LUCIDE_X_PATH)
+		action.icon_color = BLUE
+		action.circle_color = Color.WHITE
+		action.icon_scale = 0.66
+		action.circle_ratio = 1.0
+		action.custom_minimum_size = Vector2(_dp(46), _dp(46))
+		action.position = Vector2(_content_width() - _dp(54), _dp(8))
+		action.z_index = 50
+		action.add_theme_stylebox_override("normal", _transparent_style())
+		action.add_theme_stylebox_override("hover", _transparent_style())
+		action.add_theme_stylebox_override("pressed", _transparent_style())
+		action.add_theme_stylebox_override("focus", _transparent_style())
 		action.pressed.connect(func() -> void:
 			_remove_media_item(index)
 		)
-	_make_bouncy(action)
-	preview_wrap.add_child(action)
+		_make_bouncy(action)
+		preview_wrap.add_child(action)
 
 	return preview_wrap
 
@@ -2030,7 +2284,7 @@ func _build_menu_overlay() -> void:
 	box.add_child(_gap(2))
 	box.add_child(_menu_option("Acasă", func(): _navigate_to(0)))
 	box.add_child(_menu_option("Problemă", func(): _navigate_to(1)))
-	box.add_child(_menu_option("Poze / video", func(): _navigate_to(2)))
+	box.add_child(_menu_option("Poze", func(): _navigate_to(2)))
 	box.add_child(_secondary_button("Închide", _close_menu))
 
 func _menu_option(text: String, cb: Callable) -> Button:
@@ -2207,6 +2461,62 @@ class ActionButton:
 		draw_line(c + Vector2(d * 0.10, -d * 0.30), c + Vector2(d * 0.42, 0), arrow_color, w, true)
 		draw_line(c + Vector2(d * 0.10, d * 0.30), c + Vector2(d * 0.42, 0), arrow_color, w, true)
 
+
+class UploadIconButton:
+	extends Button
+	var icon_kind := "camera"
+	var icon_texture: Texture2D
+	var icon_color := Color("#12BAC2")
+
+	func _ready() -> void:
+		text = ""
+		flat = true
+		focus_mode = Control.FOCUS_NONE
+		action_mode = BaseButton.ACTION_MODE_BUTTON_PRESS
+		texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR
+		mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+		resized.connect(queue_redraw)
+		button_down.connect(queue_redraw)
+		button_up.connect(queue_redraw)
+
+	func _draw() -> void:
+		var c := size * 0.5
+		var d: float = minf(size.x, size.y) * 0.52
+		if icon_texture != null:
+			var rect := Rect2(c - Vector2(d, d) * 0.5, Vector2(d, d))
+			draw_texture_rect(icon_texture, rect, false, icon_color)
+			return
+		var w: float = maxf(3.0, d * 0.09)
+		if icon_kind == "video":
+			_draw_video_icon(c, d, w)
+		else:
+			_draw_camera_icon(c, d, w)
+
+	func _draw_camera_icon(c: Vector2, d: float, w: float) -> void:
+		var body := Rect2(c.x - d * 0.44, c.y - d * 0.23, d * 0.88, d * 0.58)
+		draw_arc(c, d * 0.18, 0.0, TAU, 32, icon_color, w, true)
+		draw_arc(c, d * 0.14, 0.0, TAU, 32, icon_color, w, true)
+		draw_line(body.position + Vector2(d * 0.08, 0), body.position + Vector2(d * 0.22, -d * 0.18), icon_color, w, true)
+		draw_line(body.position + Vector2(d * 0.22, -d * 0.18), body.position + Vector2(d * 0.38, -d * 0.18), icon_color, w, true)
+		draw_line(body.position + Vector2(d * 0.38, -d * 0.18), body.position + Vector2(d * 0.50, 0), icon_color, w, true)
+		draw_line(body.position, body.position + Vector2(body.size.x, 0), icon_color, w, true)
+		draw_line(body.position + Vector2(body.size.x, 0), body.position + body.size, icon_color, w, true)
+		draw_line(body.position + body.size, body.position + Vector2(0, body.size.y), icon_color, w, true)
+		draw_line(body.position + Vector2(0, body.size.y), body.position, icon_color, w, true)
+
+	func _draw_video_icon(c: Vector2, d: float, w: float) -> void:
+		var left := c + Vector2(-d * 0.44, -d * 0.25)
+		var right := c + Vector2(d * 0.16, d * 0.25)
+		draw_line(left, Vector2(right.x, left.y), icon_color, w, true)
+		draw_line(Vector2(right.x, left.y), right, icon_color, w, true)
+		draw_line(right, Vector2(left.x, right.y), icon_color, w, true)
+		draw_line(Vector2(left.x, right.y), left, icon_color, w, true)
+		draw_colored_polygon(PackedVector2Array([
+			Vector2(c.x + d * 0.18, c.y - d * 0.12),
+			Vector2(c.x + d * 0.48, c.y - d * 0.30),
+			Vector2(c.x + d * 0.48, c.y + d * 0.30),
+			Vector2(c.x + d * 0.18, c.y + d * 0.12)
+		]), icon_color)
 
 class WideIconOptionButton:
 	extends Button
