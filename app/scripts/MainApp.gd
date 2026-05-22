@@ -49,6 +49,8 @@ const UF_ICON_CIRCLE_BUTTON_SCRIPT := preload("res://app/scripts/ui/UFIconCircle
 const UF_CATEGORY_ICON_BUTTON_SCRIPT := preload("res://app/scripts/ui/UFCategoryIconButton.gd")
 const UF_WIDE_ICON_OPTION_BUTTON_SCRIPT := preload("res://app/scripts/ui/UFWideIconOptionButton.gd")
 const UF_PILL_ICON_BUTTON_SCRIPT := preload("res://app/scripts/ui/UFPillIconButton.gd")
+const UF_GRADIENT_BACKGROUND_SCRIPT := preload("res://app/scripts/background/UFGradientBackground.gd")
+const UF_HILLS_BACKGROUND_SCRIPT := preload("res://app/scripts/background/UFHillsBackground.gd")
 
 var _page_index := 0
 var _scale := 1.0
@@ -165,7 +167,6 @@ func _compute_scale() -> void:
 	if vp.x <= 0.0 or vp.y <= 0.0:
 		_scale = 1.0
 		return
-
 	var raw_scale: float = minf(vp.x / DESIGN_WIDTH, vp.y / DESIGN_HEIGHT)
 	_scale = clampf(raw_scale, 0.86, 2.65)
 
@@ -179,7 +180,6 @@ func _load_font_if_available() -> void:
 	if FONT_PATH != "" and ResourceLoader.exists(FONT_PATH):
 		_app_font = load(FONT_PATH)
 		return
-
 	var system_font := SystemFont.new()
 	system_font.font_names = PackedStringArray(["Arial", "Roboto", "Noto Sans", "Helvetica", "Sans Serif"])
 	system_font.font_weight = 800
@@ -190,7 +190,6 @@ func _apply_font(c: Control, font_size: int) -> void:
 	if _app_font != null:
 		c.add_theme_font_override("font", _app_font)
 	c.add_theme_font_size_override("font_size", _sp(font_size))
-
 
 func _load_local_data() -> void:
 	if not FileAccess.file_exists(LOCAL_DB_PATH):
@@ -209,9 +208,7 @@ func _save_local_data() -> void:
 	var file := FileAccess.open(LOCAL_DB_PATH, FileAccess.WRITE)
 	if file == null:
 		return
-	file.store_string(JSON.stringify({
-		"requests": _saved_requests
-	}, "\t"))
+	file.store_string(JSON.stringify({"requests": _saved_requests}, "\t"))
 
 func _set_form_value(key: String, value: Variant) -> void:
 	_form_data[key] = value
@@ -238,11 +235,7 @@ func _add_media_item(path: String, kind: String) -> void:
 	var media := _selected_media()
 	if media.size() >= 3:
 		media.remove_at(0)
-	media.append({
-		"path": path,
-		"kind": kind,
-		"created_at": Time.get_datetime_string_from_system()
-	})
+	media.append({"path": path, "kind": kind, "created_at": Time.get_datetime_string_from_system()})
 	_form_data["media"] = media
 	if _page_index == 2:
 		_show_page(2)
@@ -281,10 +274,36 @@ func _texture_from_path(path: String) -> Texture2D:
 			return tex
 	var img := Image.new()
 	var err := img.load(path)
-	if err != OK:
+	if err == OK and not img.is_empty():
+		return ImageTexture.create_from_image(img)
+	var bytes := FileAccess.get_file_as_bytes(path)
+	if bytes.is_empty():
+		return null
+	img = _image_from_bytes(bytes, path.get_extension().to_lower())
+	if img == null or img.is_empty():
 		return null
 	return ImageTexture.create_from_image(img)
 
+func _image_from_bytes(bytes: PackedByteArray, preferred_ext: String = "") -> Image:
+	var image := Image.new()
+	var loaders: Array[String] = []
+	match preferred_ext:
+		"png": loaders = ["png", "jpg", "webp", "bmp"]
+		"jpg", "jpeg": loaders = ["jpg", "png", "webp", "bmp"]
+		"webp": loaders = ["webp", "png", "jpg", "bmp"]
+		"bmp": loaders = ["bmp", "png", "jpg", "webp"]
+		_: loaders = ["png", "jpg", "webp", "bmp"]
+	for loader in loaders:
+		var err := OK
+		match loader:
+			"png": err = image.load_png_from_buffer(bytes)
+			"jpg": err = image.load_jpg_from_buffer(bytes)
+			"webp": err = image.load_webp_from_buffer(bytes)
+			"bmp": err = image.load_bmp_from_buffer(bytes)
+		if err == OK and not image.is_empty():
+			return image
+		image = Image.new()
+	return null
 
 func _load_texture(path: String) -> Texture2D:
 	if path.strip_edges() == "" or not ResourceLoader.exists(path):
@@ -295,57 +314,35 @@ func _load_texture(path: String) -> Texture2D:
 	return null
 
 func _open_gallery_picker() -> void:
-	var filters := PackedStringArray([
-		"*.png,*.jpg,*.jpeg,*.webp,*.bmp ; Imagini"
-	])
-
-	print("UrgentFix gallery picker: opening native file dialog")
-	DisplayServer.file_dialog_show(
-		"Alege o poză",
-		"",
-		"",
-		false,
-		DisplayServer.FILE_DIALOG_MODE_OPEN_FILE,
-		filters,
-		Callable(self, "_on_gallery_picker_selected")
-	)
+	var filters := PackedStringArray(["*.png,*.jpg,*.jpeg,*.webp,*.bmp ; Imagini"])
+	DisplayServer.file_dialog_show("Alege o poză", "", "", false, DisplayServer.FILE_DIALOG_MODE_OPEN_FILE, filters, Callable(self, "_on_gallery_picker_selected"))
 
 func _on_gallery_picker_selected(status: bool, selected_paths: PackedStringArray, _selected_filter_index: int) -> void:
 	if not status or selected_paths.is_empty():
 		return
-
 	var source_path := selected_paths[0]
 	var saved := _copy_gallery_photo_to_local(source_path)
 	if saved != "":
 		_add_media_item(saved, "photo")
 	else:
-		_show_small_notice(
-			"Galerie",
-			"Poza selectată nu a putut fi citită. Încearcă altă imagine din galerie."
-		)
+		_show_small_notice("Galerie", "Poza selectată nu a putut fi citită. Încearcă altă imagine din galerie.")
 
 func _copy_gallery_photo_to_local(source_path: String) -> String:
 	if source_path.strip_edges() == "":
 		return ""
-
 	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(LOCAL_MEDIA_DIR))
 	var target := "%s/gallery_photo_%d.png" % [LOCAL_MEDIA_DIR, Time.get_unix_time_from_system()]
-
 	var img := Image.new()
 	var load_error := img.load(source_path)
 	if load_error == OK and not img.is_empty():
 		return target if img.save_png(target) == OK else ""
-
 	var bytes := FileAccess.get_file_as_bytes(source_path)
 	if bytes.is_empty():
 		return ""
-
-	var file := FileAccess.open(target, FileAccess.WRITE)
-	if file == null:
+	var decoded := _image_from_bytes(bytes, source_path.get_extension().to_lower())
+	if decoded == null or decoded.is_empty():
 		return ""
-
-	file.store_buffer(bytes)
-	return target
+	return target if decoded.save_png(target) == OK else ""
 
 func _request_camera_permission_if_possible() -> bool:
 	if OS.has_method("request_permission"):
@@ -362,55 +359,32 @@ func _open_camera_capture() -> void:
 
 func _open_native_camera_flow() -> void:
 	_print_native_camera_debug("%s_button_pressed" % _native_camera_mode)
-
 	var native_camera := _get_native_camera_node()
 	if native_camera == null:
-		_show_small_notice(
-			"Camera debug",
-			"Nu am putut crea nodul NativeCamera.\n\n" + _native_camera_debug_report("native_camera_node_null")
-		)
+		_show_small_notice("Camera debug", "Nu am putut crea nodul NativeCamera.\n\n" + _native_camera_debug_report("native_camera_node_null"))
 		return
-
 	if not _has_any_native_camera_singleton():
-		_show_small_notice(
-			"NativeCamera singleton lipsă",
-			"Wrapper-ul există, dar Android singleton-ul pluginului nu este încărcat.\n\n" + _native_camera_debug_report("singleton_missing")
-		)
+		_show_small_notice("NativeCamera singleton lipsă", "Wrapper-ul există, dar Android singleton-ul pluginului nu este încărcat.\n\n" + _native_camera_debug_report("singleton_missing"))
 		return
-
 	_show_native_camera_overlay()
-
 	if native_camera.has_method("has_camera_permission") and not bool(native_camera.call("has_camera_permission")):
 		if native_camera.has_method("request_camera_permission"):
-			print("NativeCamera: requesting Android camera permission...")
 			native_camera.call("request_camera_permission")
 		else:
 			_close_camera_capture(true)
-			_show_small_notice(
-				"Permisiune necesară",
-				"Pluginul există, dar wrapper-ul nu are request_camera_permission().\n\n" + _native_camera_debug_report("missing_request_permission_method")
-			)
+			_show_small_notice("Permisiune necesară", "Pluginul există, dar wrapper-ul nu are request_camera_permission().\n\n" + _native_camera_debug_report("missing_request_permission_method"))
 		return
-
 	_start_native_camera_stream()
 
 func _get_native_camera_node() -> Node:
 	if is_instance_valid(_native_camera):
 		return _native_camera
-
 	_print_native_camera_debug("get_native_camera_node_start")
-
 	var camera_node: Node = null
 	if ClassDB.class_exists("NativeCamera"):
 		var created: Variant = ClassDB.instantiate("NativeCamera")
 		if created is Node:
 			camera_node = created
-			print("NativeCamera: created wrapper from ClassDB NativeCamera.")
-		else:
-			print("NativeCamera: ClassDB NativeCamera exists, but instantiate() did not return Node: ", created)
-	else:
-		print("NativeCamera: ClassDB class NativeCamera does not exist. Trying script paths...")
-
 	if camera_node == null:
 		var candidate_paths := PackedStringArray([
 			"res://addons/NativeCameraPlugin/NativeCamera.gd",
@@ -420,29 +394,20 @@ func _get_native_camera_node() -> Node:
 			"res://addons/NativeCamera/NativeCamera.gd"
 		])
 		for path in candidate_paths:
-			print("NativeCamera: checking wrapper path: ", path, " exists=", ResourceLoader.exists(path))
 			if ResourceLoader.exists(path):
 				var script_resource: Variant = load(path)
 				if script_resource is Script:
 					camera_node = Node.new()
 					camera_node.set_script(script_resource)
-					print("NativeCamera: created wrapper from script path: ", path)
 					break
-				else:
-					print("NativeCamera: path exists but is not Script: ", path)
-
 	if camera_node == null:
-		print("NativeCamera: failed to create wrapper node.")
 		return null
-
 	camera_node.name = "UrgentFixNativeCamera"
 	add_child(camera_node)
 	_native_camera = camera_node
-
 	_connect_native_camera_signal("camera_permission_granted", Callable(self, "_on_native_camera_permission_granted"))
 	_connect_native_camera_signal("camera_permission_denied", Callable(self, "_on_native_camera_permission_denied"))
 	_connect_native_camera_signal("frame_available", Callable(self, "_on_native_camera_frame_available"))
-
 	_print_native_camera_debug("get_native_camera_node_end")
 	return _native_camera
 
@@ -451,16 +416,9 @@ func _connect_native_camera_signal(signal_name: StringName, callable: Callable) 
 		return
 	if _native_camera.has_signal(signal_name) and not _native_camera.is_connected(signal_name, callable):
 		_native_camera.connect(signal_name, callable)
-		print("NativeCamera: connected signal: ", signal_name)
-	else:
-		print("NativeCamera: signal not available or already connected: ", signal_name)
 
 func _has_any_native_camera_singleton() -> bool:
-	var singleton_names := PackedStringArray([
-		"NativeCameraPlugin",
-		"NativeCamera",
-		"GodotNativeCamera"
-	])
+	var singleton_names := PackedStringArray(["NativeCameraPlugin", "NativeCamera", "GodotNativeCamera"])
 	for singleton_name in singleton_names:
 		if Engine.has_singleton(singleton_name):
 			return true
@@ -489,40 +447,33 @@ func _native_camera_debug_report(context: String) -> String:
 	return "\n".join(lines)
 
 func _print_native_camera_debug(context: String) -> void:
-	print("")
-	print("========== URGENTFIX NATIVE CAMERA DEBUG ==========")
+	print("\n========== URGENTFIX NATIVE CAMERA DEBUG ==========")
 	print(_native_camera_debug_report(context))
-	print("===================================================")
-	print("")
+	print("===================================================\n")
 
 func _show_native_camera_overlay() -> void:
 	_close_camera_capture(true)
-
 	_native_camera_last_image = null
 	_native_camera_image_texture = null
 	_native_video_recording = false
 	_native_video_started_msec = 0
 	_native_video_status_label = null
 	_native_video_record_button = null
-
 	_native_camera_overlay = Control.new()
 	_native_camera_overlay.name = "NativeCameraOverlay"
 	_native_camera_overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
 	_native_camera_overlay.mouse_filter = Control.MOUSE_FILTER_STOP
 	_native_camera_overlay.z_index = 920
 	add_child(_native_camera_overlay)
-
 	var dim := ColorRect.new()
 	dim.color = Color(0, 0, 0, 0.88)
 	dim.set_anchors_preset(Control.PRESET_FULL_RECT)
 	dim.mouse_filter = Control.MOUSE_FILTER_STOP
 	_native_camera_overlay.add_child(dim)
-
 	var center := CenterContainer.new()
 	center.set_anchors_preset(Control.PRESET_FULL_RECT)
 	center.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_native_camera_overlay.add_child(center)
-
 	var panel := PanelContainer.new()
 	panel.custom_minimum_size = Vector2(_dp(340), _dp(650))
 	panel.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
@@ -530,64 +481,47 @@ func _show_native_camera_overlay() -> void:
 	panel.mouse_filter = Control.MOUSE_FILTER_STOP
 	panel.add_theme_stylebox_override("panel", _style(Color(1, 1, 1, 0.98), BLUE, 24, 2))
 	center.add_child(panel)
-
 	var margin := MarginContainer.new()
 	margin.add_theme_constant_override("margin_left", _dp(14))
 	margin.add_theme_constant_override("margin_right", _dp(14))
 	margin.add_theme_constant_override("margin_top", _dp(14))
 	margin.add_theme_constant_override("margin_bottom", _dp(14))
 	panel.add_child(margin)
-
 	var box := VBoxContainer.new()
 	box.add_theme_constant_override("separation", _dp(12))
 	margin.add_child(box)
-
-	var title_text := "Fă o poză"
-	var title := _headline(title_text, 20)
-	box.add_child(title)
-
+	box.add_child(_headline("Fă o poză", 20))
 	var preview_shell := PanelContainer.new()
 	preview_shell.custom_minimum_size = Vector2(_dp(306), _dp(470))
 	preview_shell.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	preview_shell.add_theme_stylebox_override("panel", _style(Color("#08111E"), Color("#102B4D"), 18, 1))
 	box.add_child(preview_shell)
-
 	_native_camera_preview = TextureRect.new()
 	_native_camera_preview.set_anchors_preset(Control.PRESET_FULL_RECT)
 	_native_camera_preview.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 	_native_camera_preview.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
 	_native_camera_preview.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	preview_shell.add_child(_native_camera_preview)
-
 	var hint := _center_text("Se pornește camera...", 12)
 	hint.name = "CameraLoadingLabel"
 	hint.set_anchors_preset(Control.PRESET_FULL_RECT)
 	hint.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	hint.add_theme_color_override("font_color", Color.WHITE)
 	preview_shell.add_child(hint)
-
-
 	var row := HBoxContainer.new()
 	row.add_theme_constant_override("separation", _dp(10))
 	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	box.add_child(row)
-
-	var cancel := _secondary_button("Renunță", func() -> void:
-		_close_camera_capture(true)
-	)
+	var cancel := _secondary_button("Renunță", func() -> void: _close_camera_capture(true))
 	cancel.icon_texture = null
 	cancel.arrow_texture = null
 	cancel.icon_kind = "none"
 	row.add_child(cancel)
-
-	var snap := _primary_button("Capturează", func() -> void:
-		_capture_native_camera_photo()
-	)
+	var snap := _primary_button("Capturează", func() -> void: _capture_native_camera_photo())
 	snap.icon_texture = null
 	snap.arrow_texture = null
 	snap.icon_kind = "none"
 	row.add_child(snap)
-
 	panel.scale = Vector2(0.94, 0.94)
 	panel.modulate.a = 0.0
 	var tween := create_tween()
@@ -600,10 +534,7 @@ func _on_native_camera_permission_granted() -> void:
 
 func _on_native_camera_permission_denied() -> void:
 	_close_camera_capture(true)
-	_show_small_notice(
-		"Permisiune blocată",
-		"Camera este refuzată. Activeaz-o din setările aplicației și încearcă din nou."
-	)
+	_show_small_notice("Permisiune blocată", "Camera este refuzată. Activeaz-o din setările aplicației și încearcă din nou.")
 
 func _start_native_camera_stream() -> void:
 	if not is_instance_valid(_native_camera):
@@ -612,19 +543,16 @@ func _start_native_camera_stream() -> void:
 		_close_camera_capture(true)
 		_show_small_notice("Camera indisponibilă", "Pluginul NativeCamera este incomplet sau nu este activ.")
 		return
-
 	var cameras: Array = _native_camera.call("get_all_cameras")
 	if cameras.is_empty():
 		_close_camera_capture(true)
 		_show_small_notice("Camera indisponibilă", "Nu am găsit nicio cameră disponibilă pe telefon.")
 		return
-
 	var selected_camera: Variant = cameras[0]
 	for camera_info in cameras:
 		if camera_info != null and camera_info.has_method("is_front_facing") and not bool(camera_info.call("is_front_facing")):
 			selected_camera = camera_info
 			break
-
 	var selected_size := _best_native_camera_size(selected_camera)
 	var request: Variant = null
 	if _native_camera.has_method("create_feed_request"):
@@ -633,7 +561,6 @@ func _start_native_camera_stream() -> void:
 		_close_camera_capture(true)
 		_show_small_notice("Camera indisponibilă", "Nu am putut crea cererea pentru feed-ul camerei.")
 		return
-
 	if selected_camera != null and selected_camera.has_method("get_camera_id") and request.has_method("set_camera_id"):
 		request.call("set_camera_id", str(selected_camera.call("get_camera_id")))
 	if request.has_method("set_width"):
@@ -652,7 +579,6 @@ func _start_native_camera_stream() -> void:
 		request.call("set_mirror_horizontal", false)
 	if request.has_method("set_mirror_vertical"):
 		request.call("set_mirror_vertical", false)
-
 	_native_camera.call("start", request)
 	_native_camera_streaming = true
 
@@ -660,11 +586,9 @@ func _best_native_camera_size(camera_info: Variant) -> Vector2i:
 	var best := Vector2i(1280, 720)
 	if camera_info == null or not camera_info.has_method("get_output_sizes"):
 		return best
-
 	var sizes: Array = camera_info.call("get_output_sizes")
 	if sizes.is_empty():
 		return best
-
 	var best_score := 2147483647.0
 	for item in sizes:
 		if item == null:
@@ -677,14 +601,12 @@ func _best_native_camera_size(camera_info: Variant) -> Vector2i:
 			height = int(item.call("get_height"))
 		if width <= 0 or height <= 0:
 			continue
-
 		var long_side := maxi(width, height)
 		var short_side := mini(width, height)
 		var score := absf(float(long_side - 1280)) + absf(float(short_side - 720))
 		if score < best_score:
 			best_score = score
 			best = Vector2i(width, height)
-
 	return best
 
 func _on_native_camera_frame_available(frame_info: Variant) -> void:
@@ -693,108 +615,25 @@ func _on_native_camera_frame_available(frame_info: Variant) -> void:
 	var image_variant: Variant = frame_info.call("get_image")
 	if not (image_variant is Image):
 		return
-
 	var frame_image := image_variant as Image
 	if frame_image.is_empty():
 		return
-
 	_native_camera_last_image = frame_image.duplicate()
 	_native_camera_image_texture = ImageTexture.create_from_image(_native_camera_last_image)
-
 	if is_instance_valid(_native_camera_preview):
 		_native_camera_preview.texture = _native_camera_image_texture
 		var loading := _native_camera_preview.get_parent().get_node_or_null("CameraLoadingLabel") as Control
 		if loading != null:
 			loading.visible = false
 
-func _toggle_native_video_recording() -> void:
-	if _native_video_recording:
-		_finish_native_video_recording()
-		return
-
-	if _native_camera_last_image == null or _native_camera_last_image.is_empty():
-		_show_small_notice("Camera pornește", "Așteaptă să apară imaginea, apoi încearcă din nou.")
-		return
-
-	_native_video_recording = true
-	_native_video_started_msec = Time.get_ticks_msec()
-	if is_instance_valid(_native_video_record_button):
-		_native_video_record_button.text = "Oprește"
-	if is_instance_valid(_native_video_status_label):
-		_native_video_status_label.text = "Se înregistrează... 0/20s"
-
-	if is_instance_valid(_native_video_timer):
-		_native_video_timer.queue_free()
-	_native_video_timer = Timer.new()
-	_native_video_timer.wait_time = 0.2
-	_native_video_timer.one_shot = false
-	_native_video_timer.timeout.connect(_update_native_video_recording_timer)
-	add_child(_native_video_timer)
-	_native_video_timer.start()
-
-func _update_native_video_recording_timer() -> void:
-	if not _native_video_recording:
-		return
-	var elapsed := float(Time.get_ticks_msec() - _native_video_started_msec) / 1000.0
-	var shown := mini(20, int(floor(elapsed)))
-	if is_instance_valid(_native_video_status_label):
-		_native_video_status_label.text = "Se înregistrează... %d/20s" % shown
-	if elapsed >= 20.0:
-		_finish_native_video_recording()
-
-func _finish_native_video_recording() -> void:
-	if not _native_video_recording:
-		return
-	_native_video_recording = false
-	if is_instance_valid(_native_video_timer):
-		_native_video_timer.stop()
-		_native_video_timer.queue_free()
-	_native_video_timer = null
-
-	if _native_camera_last_image == null or _native_camera_last_image.is_empty():
-		_close_camera_capture(true)
-		_show_small_notice("Video invalid", "Camera nu a trimis niciun cadru valid.")
-		return
-
-	var elapsed := clampf(float(Time.get_ticks_msec() - _native_video_started_msec) / 1000.0, 0.1, 20.0)
-	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(LOCAL_MEDIA_DIR))
-	var stamp := int(Time.get_unix_time_from_system())
-	var thumb_path := "%s/video_thumb_%d.png" % [LOCAL_MEDIA_DIR, stamp]
-	var meta_path := "%s/video_%d.json" % [LOCAL_MEDIA_DIR, stamp]
-	var save_error := _native_camera_last_image.save_png(thumb_path)
-	if save_error != OK:
-		_close_camera_capture(true)
-		_show_small_notice("Eroare salvare", "Preview-ul video nu a putut fi salvat local.")
-		return
-
-	var file := FileAccess.open(meta_path, FileAccess.WRITE)
-	if file == null:
-		_close_camera_capture(true)
-		_show_small_notice("Eroare salvare", "Fișierul video local nu a putut fi creat.")
-		return
-
-	file.store_string(JSON.stringify({
-		"kind": "video",
-		"duration_seconds": elapsed,
-		"max_seconds": 20,
-		"thumbnail": thumb_path,
-		"created_at": Time.get_datetime_string_from_system(),
-		"note": "NativeCameraPlugin streams frames only; this app stores a local video capture manifest plus thumbnail."
-	}, "\t"))
-
-	_close_camera_capture(true)
-	_add_media_item(meta_path, "video")
-
 func _capture_native_camera_photo() -> void:
 	if _native_camera_last_image == null or _native_camera_last_image.is_empty():
 		_show_small_notice("Camera pornește", "Așteaptă o secundă să apară imaginea, apoi încearcă din nou.")
 		return
-
 	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(LOCAL_MEDIA_DIR))
 	var target := "%s/photo_%d.png" % [LOCAL_MEDIA_DIR, Time.get_unix_time_from_system()]
 	var save_error := _native_camera_last_image.save_png(target)
 	_close_camera_capture(true)
-
 	if save_error == OK:
 		_add_media_item(target, "photo")
 	else:
@@ -806,11 +645,9 @@ func _close_camera_capture(close_overlay: bool = true) -> void:
 		_native_video_timer.stop()
 		_native_video_timer.queue_free()
 	_native_video_timer = null
-
 	if is_instance_valid(_native_camera) and _native_camera_streaming and _native_camera.has_method("stop"):
 		_native_camera.call("stop")
 	_native_camera_streaming = false
-
 	if _camera_feed_id >= 0:
 		for i in range(CameraServer.get_feed_count()):
 			var feed := CameraServer.get_feed(i)
@@ -819,7 +656,6 @@ func _close_camera_capture(close_overlay: bool = true) -> void:
 				break
 	_camera_feed_id = -1
 	_camera_texture = null
-
 	if close_overlay:
 		if is_instance_valid(_camera_overlay):
 			_camera_overlay.queue_free()
@@ -828,14 +664,12 @@ func _close_camera_capture(close_overlay: bool = true) -> void:
 		_native_camera_overlay = null
 		_native_camera_preview = null
 
-
 func _build_shell() -> void:
 	_phone = Control.new()
 	_phone.name = "NativePhoneApp"
 	_phone.set_anchors_preset(Control.PRESET_FULL_RECT)
 	_phone.mouse_filter = Control.MOUSE_FILTER_PASS
 	add_child(_phone)
-
 	_background_layer = Control.new()
 	_background_layer.name = "BackgroundLayer"
 	_background_layer.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -845,36 +679,29 @@ func _build_shell() -> void:
 	_background_layer.modulate.a = 1.0
 	if _building_initial_intro and is_instance_valid(_background_visual):
 		_background_visual.modulate.a = 0.0
-
 	_safe = MarginContainer.new()
 	_safe.set_anchors_preset(Control.PRESET_FULL_RECT)
 	if _building_initial_intro:
 		_safe.modulate.a = 0.0
 		_safe.position.y = _dp(12)
 	_phone.add_child(_safe)
-
-	var side_margin := 18.0
-	_safe.add_theme_constant_override("margin_left", _dp(side_margin))
-	_safe.add_theme_constant_override("margin_right", _dp(side_margin))
+	_safe.add_theme_constant_override("margin_left", _dp(18))
+	_safe.add_theme_constant_override("margin_right", _dp(18))
 	_safe.add_theme_constant_override("margin_top", _dp(34))
 	_safe.add_theme_constant_override("margin_bottom", _dp(12))
-
 	var stack := VBoxContainer.new()
 	stack.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	stack.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	stack.add_theme_constant_override("separation", _dp(10))
 	_safe.add_child(stack)
-
 	var bar := HBoxContainer.new()
 	bar.custom_minimum_size.y = _dp(72)
 	bar.alignment = BoxContainer.ALIGNMENT_CENTER
 	bar.add_theme_constant_override("separation", _dp(8))
 	stack.add_child(bar)
-
 	_back = _back_button()
 	_back.pressed.connect(_go_back)
 	bar.add_child(_back)
-
 	_title = Label.new()
 	_title.text = "UrgentFix"
 	_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -883,24 +710,19 @@ func _build_shell() -> void:
 	_title.add_theme_color_override("font_color", TEXT)
 	_apply_font(_title, 18)
 	bar.add_child(_title)
-
 	var menu_wrap := MarginContainer.new()
 	menu_wrap.custom_minimum_size = Vector2(_dp(52), _dp(52))
-	menu_wrap.add_theme_constant_override("margin_top", _dp(0))
 	_menu = _menu_button()
 	_menu.pressed.connect(_toggle_menu)
 	menu_wrap.add_child(_menu)
 	bar.add_child(menu_wrap)
-
 	_content = Control.new()
 	_content.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_content.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	stack.add_child(_content)
-
 	_build_menu_overlay()
 	_build_top_hit_buttons()
 	call_deferred("_sync_top_hit_buttons")
-
 
 func _build_app_background(parent: Control) -> Control:
 	var visual := Control.new()
@@ -908,7 +730,6 @@ func _build_app_background(parent: Control) -> Control:
 	visual.set_anchors_preset(Control.PRESET_FULL_RECT)
 	visual.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	parent.add_child(visual)
-
 	if ResourceLoader.exists(BACKGROUND_PATH):
 		var bg_image := TextureRect.new()
 		bg_image.name = "AppBackgroundImage"
@@ -919,23 +740,19 @@ func _build_app_background(parent: Control) -> Control:
 		bg_image.texture = load(BACKGROUND_PATH)
 		visual.add_child(bg_image)
 		return visual
-
-	var bg := GradientBackground.new()
+	var bg := UF_GRADIENT_BACKGROUND_SCRIPT.new()
 	bg.set_anchors_preset(Control.PRESET_FULL_RECT)
 	bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	visual.add_child(bg)
-
 	var white := ColorRect.new()
 	white.color = Color(1, 1, 1, 0.58)
 	white.set_anchors_preset(Control.PRESET_FULL_RECT)
 	white.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	visual.add_child(white)
-
-	var hills := HillsBackground.new()
+	var hills := UF_HILLS_BACKGROUND_SCRIPT.new()
 	hills.set_anchors_preset(Control.PRESET_FULL_RECT)
 	hills.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	visual.add_child(hills)
-
 	return visual
 
 func _is_confirm_event(event: InputEvent) -> bool:
@@ -1033,7 +850,6 @@ func _run_initial_intro() -> void:
 				control_child.modulate.a = 0.0
 				control_child.position.y += _dp(8)
 				staged_children.append(control_child)
-
 	var bg_tween := create_tween()
 	bg_tween.tween_property(_background_visual, "modulate:a", 1.0, 0.58).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
 	await bg_tween.finished
@@ -1092,7 +908,6 @@ func _home() -> void:
 	box.add_child(_primary_button("Raportează o problemă", func(): _navigate_to(1)))
 	box.add_child(_secondary_button("Sunt prestator / firmă", func(): pass))
 	box.add_child(_popular_categories_panel())
-
 	var chips := HBoxContainer.new()
 	chips.add_theme_constant_override("separation", _dp(7))
 	box.add_child(chips)
@@ -1109,7 +924,6 @@ func _problem() -> void:
 	box.add_child(_headline("Selectează problema", 22))
 	box.add_child(_center_text("Alege categoria care descrie\ncel mai bine intervenția.", 11))
 	box.add_child(_gap(2))
-
 	var group := ButtonGroup.new()
 	var grid := GridContainer.new()
 	grid.columns = 3
@@ -1117,90 +931,69 @@ func _problem() -> void:
 	grid.add_theme_constant_override("h_separation", _dp(8))
 	grid.add_theme_constant_override("v_separation", _dp(8))
 	box.add_child(grid)
-
 	var card_instalatii := _problem_category_card("Instalații", LUCIDE_PLUG_PATH, TEAL_DARK, Color("#E9FCFD"))
 	card_instalatii.button_pressed = str(_form_data.get("problem_category", "")) == "Instalații"
 	card_instalatii.button_group = group
 	grid.add_child(card_instalatii)
-
 	var card_electric := _problem_category_card("Electric", LUCIDE_BOLT_PATH, Color("#FFC43D"), Color("#FFF6DB"))
 	card_electric.button_pressed = str(_form_data.get("problem_category", "")) == "Electric"
 	card_electric.button_group = group
 	grid.add_child(card_electric)
-
 	var card_zugraveli := _problem_category_card("Zugrăveli", LUCIDE_PAINT_PATH, Color("#4F83D9"), Color("#EEF5FF"))
 	card_zugraveli.button_pressed = str(_form_data.get("problem_category", "")) == "Zugrăveli"
 	card_zugraveli.button_group = group
 	grid.add_child(card_zugraveli)
-
 	var card_centrala := _problem_category_card("Centrală /\nîncălzire", LUCIDE_FLAME_PATH, TEAL_DARK, Color("#E9FCFD"))
 	card_centrala.button_pressed = str(_form_data.get("problem_category", "")) == "Centrală / încălzire"
 	card_centrala.button_group = group
 	grid.add_child(card_centrala)
-
 	var card_infiltratii := _problem_category_card("Infiltrații", LUCIDE_DROPLETS_PATH, Color("#4F83D9"), Color("#EEF5FF"))
 	card_infiltratii.button_pressed = str(_form_data.get("problem_category", "")) == "Infiltrații"
 	card_infiltratii.button_group = group
 	grid.add_child(card_infiltratii)
-
 	var card_aer := _problem_category_card("Aer\ncondiționat", LUCIDE_AIR_VENT_PATH, TEAL_DARK, Color("#E9FCFD"))
 	card_aer.button_pressed = str(_form_data.get("problem_category", "")) == "Aer condiționat"
 	card_aer.button_group = group
 	grid.add_child(card_aer)
-
 	var other := _wide_icon_option("Altele", LUCIDE_ELLIPSIS_PATH)
 	other.button_pressed = str(_form_data.get("problem_category", "")) == "Altele"
 	other.button_group = group
 	box.add_child(other)
-
 	var other_input := _other_issue_input()
 	other_input.text = str(_form_data.get("other_issue", ""))
 	other_input.visible = other.button_pressed
-	other_input.text_changed.connect(func() -> void:
-		_set_form_value("other_issue", other_input.text)
-	)
+	other_input.text_changed.connect(func() -> void: _set_form_value("other_issue", other_input.text))
 	box.add_child(other_input)
-	other.toggled.connect(func(pressed: bool) -> void:
-		other_input.visible = pressed
-	)
-
+	other.toggled.connect(func(pressed: bool) -> void: other_input.visible = pressed)
 	var urgency_title := _section("Cât de urgentă este intervenția?")
 	urgency_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	urgency_title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	box.add_child(urgency_title)
-
 	var urgency_group := ButtonGroup.new()
 	var urgency := HBoxContainer.new()
 	urgency.alignment = BoxContainer.ALIGNMENT_CENTER
 	urgency.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	urgency.add_theme_constant_override("separation", _dp(7))
 	box.add_child(urgency)
-
 	var pill_urgent := _pill_icon("Urgent", LUCIDE_ALERT_PATH, str(_form_data.get("urgency", "")) == "Urgent")
 	pill_urgent.button_group = urgency_group
 	urgency.add_child(pill_urgent)
-
 	var pill_azi := _pill_icon("Azi", LUCIDE_CALENDAR_PATH, str(_form_data.get("urgency", "")) == "Azi")
 	pill_azi.button_group = urgency_group
 	urgency.add_child(pill_azi)
-
 	var pill_zile := _pill_icon("2-3 zile", LUCIDE_CLOCK_PATH, str(_form_data.get("urgency", "")) == "2-3 zile")
 	pill_zile.button_group = urgency_group
 	urgency.add_child(pill_zile)
-
 	var pill_saptamana := _pill_icon("Săptămâna\naceasta", LUCIDE_CALENDAR_DAYS_PATH, str(_form_data.get("urgency", "")) == "Săptămâna aceasta")
 	pill_saptamana.button_group = urgency_group
 	urgency.add_child(pill_saptamana)
-
 	box.add_child(_gap(5))
 	var continue_button := _primary_button("Continuă", func(): _navigate_to(2))
 	box.add_child(continue_button)
 	_update_problem_continue_state(continue_button, group, urgency_group)
-
 	var refresh_continue := func(_pressed: bool) -> void:
 		_save_problem_selection(group, urgency_group)
 		_update_problem_continue_state(continue_button, group, urgency_group)
-
 	card_instalatii.toggled.connect(refresh_continue)
 	card_electric.toggled.connect(refresh_continue)
 	card_zugraveli.toggled.connect(refresh_continue)
@@ -1212,9 +1005,7 @@ func _problem() -> void:
 	pill_azi.toggled.connect(refresh_continue)
 	pill_zile.toggled.connect(refresh_continue)
 	pill_saptamana.toggled.connect(refresh_continue)
-
 	box.add_child(_gap(18))
-
 
 func _save_problem_selection(problem_group: ButtonGroup, urgency_group: ButtonGroup) -> void:
 	var problem := ""
@@ -1244,12 +1035,6 @@ func _update_problem_continue_state(button: Button, problem_group: ButtonGroup, 
 	var has_problem := problem_group != null and problem_group.get_pressed_button() != null
 	var has_urgency := urgency_group != null and urgency_group.get_pressed_button() != null
 	var enabled := has_problem and has_urgency
-
-	if button.has_meta("continue_opacity_tween"):
-		var previous_tween: Variant = button.get_meta("continue_opacity_tween")
-		if previous_tween is Tween and previous_tween.is_valid():
-			previous_tween.kill()
-
 	button.modulate.a = 1.0
 	button.disabled = not enabled
 	button.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND if enabled else Control.CURSOR_FORBIDDEN
@@ -1258,12 +1043,10 @@ func _update_problem_continue_state(button: Button, problem_group: ButtonGroup, 
 func _apply_continue_button_visual(button: Button, enabled: bool) -> void:
 	if not is_instance_valid(button):
 		return
-
 	var fill := BLUE if enabled else Color(1, 1, 1, 0.0)
-	var border := BLUE if enabled else BLUE
+	var border := BLUE
 	var text_color := Color.WHITE if enabled else BLUE
 	var border_width := 0 if enabled else 3
-
 	button.add_theme_color_override("font_color", text_color)
 	button.add_theme_color_override("font_hover_color", text_color)
 	button.add_theme_color_override("font_pressed_color", text_color)
@@ -1272,7 +1055,6 @@ func _apply_continue_button_visual(button: Button, enabled: bool) -> void:
 	button.add_theme_stylebox_override("hover", _style(fill, border, 15, border_width))
 	button.add_theme_stylebox_override("pressed", _style(fill, border, 15, border_width))
 	button.add_theme_stylebox_override("disabled", _style(fill, border, 15, border_width))
-
 	if button is UFActionButton:
 		var action_button := button as UFActionButton
 		action_button.icon_color = text_color
@@ -1295,7 +1077,6 @@ func _other_issue_input() -> TextEdit:
 	edit.add_theme_constant_override("caret_width", _dp(3))
 	edit.caret_blink = true
 	edit.caret_blink_interval = 0.42
-	edit.add_theme_color_override("font_placeholder_color", Color("#8AA0BB"))
 	edit.add_theme_stylebox_override("normal", _style(Color.WHITE, BORDER, 14, 1))
 	edit.add_theme_stylebox_override("focus", _style(Color.WHITE, TEAL, 14, 2))
 	return edit
@@ -1303,13 +1084,13 @@ func _other_issue_input() -> TextEdit:
 func _media() -> void:
 	_title.text = ""
 	var box := _page_scroll()
-	box.add_theme_constant_override("separation", _dp(9))
+	box.add_theme_constant_override("separation", _dp(7))
 	box.add_child(_compact_logo_block())
 	box.add_child(_headline("Adaugă poze", 22))
 	box.add_child(_center_text("Arată-ne problema pentru un\ndiagnostic mai rapid.", 12))
 
 	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", _dp(10))
+	row.add_theme_constant_override("separation", _dp(8))
 	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	box.add_child(row)
 
@@ -1372,6 +1153,10 @@ func _media() -> void:
 	_description_counter.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	desc_box.add_child(_description_counter)
 
+	var finalize_button := _primary_button("Finalizează", func() -> void:
+		_finalize_request()
+	)
+
 	edit.text_changed.connect(func() -> void:
 		if edit.text.length() > 250:
 			var caret_line := edit.get_caret_line()
@@ -1382,10 +1167,10 @@ func _media() -> void:
 		_form_data["description"] = edit.text
 		if is_instance_valid(_description_counter):
 			_description_counter.text = "%d/250" % edit.text.length()
+		_update_media_finalize_state(finalize_button)
 	)
 
 	box.add_child(_media_limit_note())
-	var finalize_button := _primary_button("Finalizează", func(): _finalize_request())
 	box.add_child(finalize_button)
 	_update_media_finalize_state(finalize_button)
 	box.add_child(_gap(54))
@@ -1399,17 +1184,20 @@ func _media_limit_note() -> Label:
 	note.add_theme_color_override("font_color", MUTED)
 	return note
 
-
 func _update_media_finalize_state(button: Button) -> void:
 	if not is_instance_valid(button):
 		return
-	var enabled := not _selected_media().is_empty()
+	var has_media := not _selected_media().is_empty()
+	var has_description := str(_form_data.get("description", "")).strip_edges().length() > 0
+	var enabled := has_media and has_description
 	button.disabled = not enabled
 	button.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND if enabled else Control.CURSOR_FORBIDDEN
 	_apply_continue_button_visual(button, enabled)
 
 func _finalize_request() -> void:
 	if _selected_media().is_empty():
+		return
+	if str(_form_data.get("description", "")).strip_edges().length() == 0:
 		return
 	var request := {
 		"id": "REQ-%d" % Time.get_unix_time_from_system(),
@@ -1427,28 +1215,17 @@ func _finalize_request() -> void:
 	_show_request_public_popup()
 
 func _reset_request_form() -> void:
-	_form_data = {
-		"problem_category": "",
-		"other_issue": "",
-		"urgency": "",
-		"description": "",
-		"media": []
-	}
+	_form_data = {"problem_category": "", "other_issue": "", "urgency": "", "description": "", "media": []}
 
 func _confirm_leave_request() -> void:
-	_show_confirm_notice(
-		"Ieși din cerere?",
-		"Dacă părăsești această pagină, cererea curentă nu va fi salvată.",
-		"Rămâi",
-		"Ieși",
-		func() -> void:
-			_reset_request_form()
-			_history.clear()
-			_show_page(0)
+	_show_confirm_notice("Ieși din cerere?", "Dacă părăsești această pagină, cererea curentă nu va fi salvată.", "Rămâi", "Ieși", func() -> void:
+		_reset_request_form()
+		_history.clear()
+		_show_page(0)
 	)
 
 func _show_request_public_popup() -> void:
-	_show_small_notice("Cererea este publică", "Problema ta a fost salvată local și este vizibilă pentru prestatori. Acum așteptăm ca cineva să o preia.", func() -> void:
+	_show_small_notice("Cerere înregistrată", "Cererea ta a fost înregistrată și trimisă către prestatori.", func() -> void:
 		_history.clear()
 		_show_page(0)
 	)
@@ -1461,18 +1238,15 @@ func _show_confirm_notice(title_text: String, body_text: String, cancel_text: St
 	_permission_notice_overlay.mouse_filter = Control.MOUSE_FILTER_STOP
 	_permission_notice_overlay.z_index = 950
 	add_child(_permission_notice_overlay)
-
 	var dim := ColorRect.new()
 	dim.color = Color(1, 1, 1, 0.58)
 	dim.set_anchors_preset(Control.PRESET_FULL_RECT)
 	dim.mouse_filter = Control.MOUSE_FILTER_STOP
 	_permission_notice_overlay.add_child(dim)
-
 	var center := CenterContainer.new()
 	center.set_anchors_preset(Control.PRESET_FULL_RECT)
 	center.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_permission_notice_overlay.add_child(center)
-
 	var panel := PanelContainer.new()
 	panel.custom_minimum_size = Vector2(_dp(314), 0)
 	panel.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
@@ -1481,48 +1255,38 @@ func _show_confirm_notice(title_text: String, body_text: String, cancel_text: St
 	panel.pivot_offset = Vector2(_dp(157), _dp(110))
 	panel.add_theme_stylebox_override("panel", _style(Color(1, 1, 1, 0.97), BLUE, 24, 2))
 	center.add_child(panel)
-
 	var margin := MarginContainer.new()
 	margin.add_theme_constant_override("margin_left", _dp(18))
 	margin.add_theme_constant_override("margin_right", _dp(18))
 	margin.add_theme_constant_override("margin_top", _dp(18))
 	margin.add_theme_constant_override("margin_bottom", _dp(18))
 	panel.add_child(margin)
-
 	var box := VBoxContainer.new()
 	box.add_theme_constant_override("separation", _dp(12))
 	margin.add_child(box)
-
 	var title := _headline(title_text, 20)
 	title.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	box.add_child(title)
-
 	var body := _center_text(body_text, 13)
 	body.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	body.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	box.add_child(body)
-
 	var row := HBoxContainer.new()
 	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row.add_theme_constant_override("separation", _dp(10))
 	box.add_child(row)
-
-	var cancel := _dialog_text_button(cancel_text, false, func() -> void:
+	row.add_child(_dialog_text_button(cancel_text, false, func() -> void:
 		if is_instance_valid(_permission_notice_overlay):
 			_permission_notice_overlay.queue_free()
 		if on_cancel.is_valid():
 			on_cancel.call()
-	)
-	row.add_child(cancel)
-
-	var confirm := _dialog_text_button(confirm_text, true, func() -> void:
+	))
+	row.add_child(_dialog_text_button(confirm_text, true, func() -> void:
 		if is_instance_valid(_permission_notice_overlay):
 			_permission_notice_overlay.queue_free()
 		if on_confirm.is_valid():
 			on_confirm.call()
-	)
-	row.add_child(confirm)
-
+	))
 	panel.scale = Vector2(0.90, 0.90)
 	panel.modulate.a = 0.0
 	var tween := create_tween()
@@ -1538,18 +1302,15 @@ func _show_small_notice(title_text: String, body_text: String, on_close: Callabl
 	_permission_notice_overlay.mouse_filter = Control.MOUSE_FILTER_STOP
 	_permission_notice_overlay.z_index = 950
 	add_child(_permission_notice_overlay)
-
 	var dim := ColorRect.new()
 	dim.color = Color(1, 1, 1, 0.58)
 	dim.set_anchors_preset(Control.PRESET_FULL_RECT)
 	dim.mouse_filter = Control.MOUSE_FILTER_STOP
 	_permission_notice_overlay.add_child(dim)
-
 	var center := CenterContainer.new()
 	center.set_anchors_preset(Control.PRESET_FULL_RECT)
 	center.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_permission_notice_overlay.add_child(center)
-
 	var panel := PanelContainer.new()
 	panel.custom_minimum_size = Vector2(_dp(306), 0)
 	panel.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
@@ -1558,35 +1319,28 @@ func _show_small_notice(title_text: String, body_text: String, on_close: Callabl
 	panel.pivot_offset = Vector2(_dp(153), _dp(95))
 	panel.add_theme_stylebox_override("panel", _style(Color(1, 1, 1, 0.97), BLUE, 24, 2))
 	center.add_child(panel)
-
 	var margin := MarginContainer.new()
 	margin.add_theme_constant_override("margin_left", _dp(18))
 	margin.add_theme_constant_override("margin_right", _dp(18))
 	margin.add_theme_constant_override("margin_top", _dp(18))
 	margin.add_theme_constant_override("margin_bottom", _dp(18))
 	panel.add_child(margin)
-
 	var box := VBoxContainer.new()
 	box.add_theme_constant_override("separation", _dp(12))
 	margin.add_child(box)
-
 	var title := _headline(title_text, 20)
 	title.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	box.add_child(title)
-
 	var body := _center_text(body_text, 13)
 	body.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	body.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	box.add_child(body)
-
-	var ok := _primary_button("Am înțeles", func() -> void:
+	box.add_child(_dialog_text_button("Am înțeles", true, func() -> void:
 		if is_instance_valid(_permission_notice_overlay):
 			_permission_notice_overlay.queue_free()
 		if on_close.is_valid():
 			on_close.call()
-	)
-	box.add_child(ok)
-
+	))
 	panel.scale = Vector2(0.90, 0.90)
 	panel.modulate.a = 0.0
 	var tween := create_tween()
@@ -1599,7 +1353,6 @@ func _logo_block() -> VBoxContainer:
 	box.alignment = BoxContainer.ALIGNMENT_CENTER
 	box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	box.add_theme_constant_override("separation", _dp(-8))
-
 	var holder := TextureRect.new()
 	holder.custom_minimum_size = Vector2(_dp(156), _dp(137))
 	holder.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
@@ -1611,17 +1364,14 @@ func _logo_block() -> VBoxContainer:
 	elif ResourceLoader.exists(FALLBACK_LOGO_PATH):
 		holder.texture = load(FALLBACK_LOGO_PATH)
 	box.add_child(holder)
-
 	box.add_child(_logo_wordmark())
 	return box
-
 
 func _compact_logo_block() -> VBoxContainer:
 	var box := VBoxContainer.new()
 	box.alignment = BoxContainer.ALIGNMENT_CENTER
 	box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	box.add_theme_constant_override("separation", _dp(-7))
-
 	var holder := TextureRect.new()
 	holder.custom_minimum_size = Vector2(_dp(108), _dp(95))
 	holder.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
@@ -1634,26 +1384,22 @@ func _compact_logo_block() -> VBoxContainer:
 	elif ResourceLoader.exists(FALLBACK_LOGO_PATH):
 		holder.texture = load(FALLBACK_LOGO_PATH)
 	box.add_child(holder)
-
 	var row := HBoxContainer.new()
 	row.alignment = BoxContainer.ALIGNMENT_CENTER
 	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row.add_theme_constant_override("separation", 0)
-
 	var urgent := Label.new()
 	urgent.text = "Urgent"
 	urgent.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	_apply_font(urgent, 24)
 	urgent.add_theme_color_override("font_color", TEXT)
 	row.add_child(urgent)
-
 	var fix := Label.new()
 	fix.text = "Fix"
 	fix.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	_apply_font(fix, 24)
 	fix.add_theme_color_override("font_color", FIX_GREEN)
 	row.add_child(fix)
-
 	box.add_child(row)
 	return box
 
@@ -1662,14 +1408,12 @@ func _logo_wordmark() -> HBoxContainer:
 	row.alignment = BoxContainer.ALIGNMENT_CENTER
 	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row.add_theme_constant_override("separation", 0)
-
 	var urgent := Label.new()
 	urgent.text = "Urgent"
 	urgent.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	_apply_font(urgent, 46)
 	urgent.add_theme_color_override("font_color", TEXT)
 	row.add_child(urgent)
-
 	var fix := Label.new()
 	fix.text = "Fix"
 	fix.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
@@ -1852,7 +1596,6 @@ func _popular_category_card(t: String, icon_path: String, icon_color: Color, bub
 	b.add_theme_stylebox_override("pressed", _style(CARD, BORDER, 18, 2))
 	return b
 
-
 func _problem_category_card(t: String, icon_path: String, icon_color: Color, bubble_color: Color) -> Button:
 	var b := UF_CATEGORY_ICON_BUTTON_SCRIPT.new()
 	b.title = t
@@ -1906,66 +1649,20 @@ func _apply_pill_icon_style(b: Button) -> void:
 	var selected := b.button_pressed
 	var fill := BLUE if selected else Color.WHITE
 	var border := Color.WHITE if selected else BLUE
-	var width := 2
-	b.add_theme_stylebox_override("normal", _style(fill, border, 9, width))
-	b.add_theme_stylebox_override("hover", _style(fill, border, 9, width))
-	b.add_theme_stylebox_override("focus", _style(fill, border, 9, width))
-	b.add_theme_stylebox_override("pressed", _style(fill, border, 9, width))
-
-func _category_card(t: String, small: bool) -> Button:
-	var b := Button.new()
-	b.text = t
-	b.toggle_mode = true
-	b.custom_minimum_size.y = _dp(92 if small else 78)
-	b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_apply_font(b, 12 if small else 14)
-	b.add_theme_color_override("font_color", TEXT)
-	b.add_theme_color_override("font_hover_color", TEXT)
-	b.add_theme_color_override("font_pressed_color", TEXT)
-	b.add_theme_stylebox_override("normal", _style(CARD, BORDER, 18, 2))
-	b.add_theme_stylebox_override("hover", _style(CARD, BORDER, 18, 2))
-	b.add_theme_stylebox_override("focus", _style(CARD, BORDER, 18, 2))
-	b.add_theme_stylebox_override("pressed", _style(Color.WHITE, BLUE, 18, 5))
-	_make_bouncy(b)
-	return b
-
-func _wide_option(t: String) -> Button:
-	var b := Button.new()
-	b.text = t
-	b.custom_minimum_size.y = _dp(56)
-	b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_apply_font(b, 12)
-	b.add_theme_color_override("font_color", TEXT)
-	b.add_theme_stylebox_override("normal", _style(CARD, BORDER, 15, 1))
-	b.add_theme_stylebox_override("hover", _style(CARD, BORDER, 15, 1))
-	b.add_theme_stylebox_override("pressed", _style(CARD, BORDER, 15, 1))
-	_make_bouncy(b)
-	return b
-
-func _pill(t: String, selected: bool) -> Button:
-	var b := Button.new()
-	b.text = t
-	b.custom_minimum_size.y = _dp(34)
-	b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_apply_font(b, 11)
-	b.add_theme_color_override("font_color", Color.WHITE if selected else TEXT)
-	b.add_theme_stylebox_override("normal", _style(BLUE if selected else CARD, BLUE if selected else BORDER, 17, 1))
-	b.add_theme_stylebox_override("hover", _style(BLUE if selected else CARD, BLUE if selected else BORDER, 17, 1))
-	b.add_theme_stylebox_override("pressed", _style(BLUE_DARK if selected else SOFT, BLUE_DARK if selected else TEAL, 17, 1))
-	_make_bouncy(b)
-	return b
+	b.add_theme_stylebox_override("normal", _style(fill, border, 9, 2))
+	b.add_theme_stylebox_override("hover", _style(fill, border, 9, 2))
+	b.add_theme_stylebox_override("focus", _style(fill, border, 9, 2))
+	b.add_theme_stylebox_override("pressed", _style(fill, border, 9, 2))
 
 func _mini_chip(t: String, icon_path: String) -> PanelContainer:
 	var p := PanelContainer.new()
 	p.custom_minimum_size.y = _dp(46)
 	p.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	p.add_theme_stylebox_override("panel", _style(Color(0.95, 0.99, 1.0, 0.92), Color("#D6EEF8"), 16, 1))
-
 	var row := HBoxContainer.new()
 	row.alignment = BoxContainer.ALIGNMENT_CENTER
 	row.add_theme_constant_override("separation", _dp(6))
 	p.add_child(row)
-
 	var icon := TextureRect.new()
 	icon.custom_minimum_size = Vector2(_dp(24), _dp(24))
 	icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
@@ -1976,7 +1673,6 @@ func _mini_chip(t: String, icon_path: String) -> PanelContainer:
 	if ResourceLoader.exists(icon_path):
 		icon.texture = load(icon_path)
 	row.add_child(icon)
-
 	var l := Label.new()
 	l.text = t
 	l.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
@@ -1986,55 +1682,35 @@ func _mini_chip(t: String, icon_path: String) -> PanelContainer:
 	row.add_child(l)
 	return p
 
-func _upload_card(t: String, icon_path: String = "") -> Button:
+func _upload_card(t: String, _icon_path: String = "") -> Button:
 	var b := Button.new()
 	b.text = t
-	b.custom_minimum_size.y = _dp(94)
+	b.custom_minimum_size.y = _dp(42)
 	b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	b.expand_icon = false
-	b.alignment = HORIZONTAL_ALIGNMENT_CENTER
-	b.icon_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	b.vertical_icon_alignment = VERTICAL_ALIGNMENT_TOP
-	b.texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR
-	b.add_theme_constant_override("h_separation", _dp(7))
-	b.add_theme_constant_override("icon_max_width", _dp(56))
-
-	var icon_texture := _load_texture(icon_path)
-	if icon_texture != null:
-		b.icon = icon_texture
-	else:
-		push_warning("Upload icon missing: %s" % icon_path)
-
-	var accent := TEAL if t.begins_with("Fă") else Color("#3D78FF")
-	b.add_theme_color_override("icon_normal_color", accent)
-	b.add_theme_color_override("icon_hover_color", accent)
-	b.add_theme_color_override("icon_pressed_color", accent)
-	b.add_theme_color_override("icon_focus_color", accent)
-	b.add_theme_color_override("icon_disabled_color", accent)
-
+	b.focus_mode = Control.FOCUS_NONE
+	b.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 	_apply_font(b, 13)
-	b.add_theme_color_override("font_color", TEXT)
-	b.add_theme_color_override("font_hover_color", TEXT)
-	b.add_theme_color_override("font_pressed_color", TEXT)
-	b.add_theme_color_override("font_focus_color", TEXT)
-	b.add_theme_stylebox_override("normal", _style(CARD, BORDER, 12, 1))
-	b.add_theme_stylebox_override("hover", _style(CARD, TEAL, 12, 2))
-	b.add_theme_stylebox_override("pressed", _style(CARD, BLUE, 12, 2))
-	b.add_theme_stylebox_override("focus", _style(CARD, TEAL, 12, 2))
+
+	b.add_theme_color_override("font_color", Color.WHITE)
+	b.add_theme_color_override("font_hover_color", Color.WHITE)
+	b.add_theme_color_override("font_pressed_color", Color.WHITE)
+	b.add_theme_color_override("font_focus_color", Color.WHITE)
+	b.add_theme_stylebox_override("normal", _style(FIX_GREEN, FIX_GREEN, 12, 0))
+	b.add_theme_stylebox_override("hover", _style(FIX_GREEN.lightened(0.06), FIX_GREEN.lightened(0.06), 12, 0))
+	b.add_theme_stylebox_override("pressed", _style(FIX_GREEN.darkened(0.08), FIX_GREEN.darkened(0.08), 12, 0))
+	b.add_theme_stylebox_override("focus", _style(FIX_GREEN, FIX_GREEN, 12, 0))
+
 	_make_bouncy(b)
 	return b
-
 
 func _media_preview_stack() -> VBoxContainer:
 	var stack := VBoxContainer.new()
 	stack.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	stack.add_theme_constant_override("separation", _dp(8))
-
 	var media := _selected_media()
 	if media.is_empty():
 		stack.add_child(_media_preview_card(DEMO_PHOTO_PATH, "photo", -1))
 		return stack
-
 	for i in range(media.size()):
 		var item: Variant = media[i]
 		stack.add_child(_media_preview_card(_media_path_from_item(item), _media_kind_from_item(item), i))
@@ -2056,37 +1732,25 @@ func _media_preview_card(path: String, kind: String, index: int) -> Control:
 	var preview_wrap := Control.new()
 	preview_wrap.custom_minimum_size.y = _dp(172)
 	preview_wrap.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-
 	var panel := PanelContainer.new()
 	panel.set_anchors_preset(Control.PRESET_FULL_RECT)
 	panel.add_theme_stylebox_override("panel", _style(Color("#E6EDF3"), Color("#C8D3DE"), 10, 1))
 	preview_wrap.add_child(panel)
-
+	var tex: Texture2D = null
 	if kind == "photo":
-		var tex := _texture_from_path(path)
-		if tex != null:
-			var img := TextureRect.new()
-			img.set_anchors_preset(Control.PRESET_FULL_RECT)
-			img.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-			img.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
-			img.texture = tex
-			img.mouse_filter = Control.MOUSE_FILTER_IGNORE
-			panel.add_child(img)
-		else:
-			panel.add_child(_missing_media_label("Imaginea nu mai există"))
+		tex = _texture_from_path(path)
 	else:
-		var thumb := _video_thumbnail_from_metadata(path)
-		if thumb != null:
-			var img := TextureRect.new()
-			img.set_anchors_preset(Control.PRESET_FULL_RECT)
-			img.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-			img.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
-			img.texture = thumb
-			img.mouse_filter = Control.MOUSE_FILTER_IGNORE
-			panel.add_child(img)
-		else:
-			panel.add_child(_missing_media_label("Imaginea nu mai există"))
-
+		tex = _video_thumbnail_from_metadata(path)
+	if tex != null:
+		var img := TextureRect.new()
+		img.set_anchors_preset(Control.PRESET_FULL_RECT)
+		img.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		img.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		img.texture = tex
+		img.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		panel.add_child(img)
+	else:
+		panel.add_child(_missing_media_label("Imaginea nu mai există"))
 	if index >= 0:
 		var action := UF_ICON_CIRCLE_BUTTON_SCRIPT.new()
 		action.icon_texture = _load_texture(LUCIDE_X_PATH)
@@ -2101,12 +1765,9 @@ func _media_preview_card(path: String, kind: String, index: int) -> Control:
 		action.add_theme_stylebox_override("hover", _transparent_style())
 		action.add_theme_stylebox_override("pressed", _transparent_style())
 		action.add_theme_stylebox_override("focus", _transparent_style())
-		action.pressed.connect(func() -> void:
-			_remove_media_item(index)
-		)
+		action.pressed.connect(func() -> void: _remove_media_item(index))
 		_make_bouncy(action)
 		preview_wrap.add_child(action)
-
 	return preview_wrap
 
 func _missing_media_label(text: String) -> Label:
@@ -2122,21 +1783,11 @@ func _make_bouncy(button: Button) -> void:
 	button.mouse_filter = Control.MOUSE_FILTER_STOP
 	button.focus_mode = Control.FOCUS_NONE
 	button.pivot_offset = button.custom_minimum_size * 0.5
-	button.minimum_size_changed.connect(func() -> void:
-		button.pivot_offset = button.size * 0.5
-	)
-	button.resized.connect(func() -> void:
-		button.pivot_offset = button.size * 0.5
-	)
-	button.button_down.connect(func() -> void:
-		_bounce_to(button, Vector2(0.955, 0.955), 0.10, Tween.TRANS_SINE, Tween.EASE_OUT)
-	)
-	button.button_up.connect(func() -> void:
-		_bounce_to(button, Vector2.ONE, 0.28, Tween.TRANS_BACK, Tween.EASE_OUT)
-	)
-	button.mouse_exited.connect(func() -> void:
-		_bounce_to(button, Vector2.ONE, 0.22, Tween.TRANS_BACK, Tween.EASE_OUT)
-	)
+	button.minimum_size_changed.connect(func() -> void: button.pivot_offset = button.size * 0.5)
+	button.resized.connect(func() -> void: button.pivot_offset = button.size * 0.5)
+	button.button_down.connect(func() -> void: _bounce_to(button, Vector2(0.955, 0.955), 0.10, Tween.TRANS_SINE, Tween.EASE_OUT))
+	button.button_up.connect(func() -> void: _bounce_to(button, Vector2.ONE, 0.28, Tween.TRANS_BACK, Tween.EASE_OUT))
+	button.mouse_exited.connect(func() -> void: _bounce_to(button, Vector2.ONE, 0.22, Tween.TRANS_BACK, Tween.EASE_OUT))
 
 func _bounce_to(control: Control, target: Vector2, duration: float, trans: Tween.TransitionType, ease_type: Tween.EaseType) -> void:
 	if not is_instance_valid(control):
@@ -2176,7 +1827,6 @@ func _style(bg: Color, border: Color, radius: int, width: int) -> StyleBoxFlat:
 func _build_top_hit_buttons() -> void:
 	_back_hit = _top_hit_button(_go_back, _back)
 	_phone.add_child(_back_hit)
-
 	_menu_hit = _top_hit_button(_toggle_menu, _menu)
 	_phone.add_child(_menu_hit)
 
@@ -2234,7 +1884,6 @@ func _build_menu_overlay() -> void:
 	_menu_overlay.modulate.a = 0.0
 	_menu_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_phone.add_child(_menu_overlay)
-
 	var dim := ColorRect.new()
 	dim.color = Color(1, 1, 1, 0.48)
 	dim.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -2246,13 +1895,11 @@ func _build_menu_overlay() -> void:
 			_close_menu()
 	)
 	_menu_overlay.add_child(dim)
-
 	var center := CenterContainer.new()
 	center.name = "MenuCenter"
 	center.set_anchors_preset(Control.PRESET_FULL_RECT)
 	center.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_menu_overlay.add_child(center)
-
 	var panel := PanelContainer.new()
 	panel.name = "MenuPanel"
 	panel.custom_minimum_size = Vector2(_dp(306), 0)
@@ -2262,25 +1909,20 @@ func _build_menu_overlay() -> void:
 	panel.pivot_offset = Vector2(_dp(153), _dp(124))
 	panel.add_theme_stylebox_override("panel", _style(Color(1, 1, 1, 0.96), BLUE, 24, 2))
 	center.add_child(panel)
-
 	var margin := MarginContainer.new()
 	margin.add_theme_constant_override("margin_left", _dp(16))
 	margin.add_theme_constant_override("margin_right", _dp(16))
 	margin.add_theme_constant_override("margin_top", _dp(16))
 	margin.add_theme_constant_override("margin_bottom", _dp(16))
 	panel.add_child(margin)
-
 	var box := VBoxContainer.new()
 	box.add_theme_constant_override("separation", _dp(9))
 	margin.add_child(box)
-
 	var title := _section("Meniu")
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	title.add_theme_font_size_override("font_size", _sp(18))
 	box.add_child(title)
-
-	var subtitle := _center_text("Navigare rapidă prin aplicație", 11)
-	box.add_child(subtitle)
+	box.add_child(_center_text("Navigare rapidă prin aplicație", 11))
 	box.add_child(_gap(2))
 	box.add_child(_menu_option("Acasă", func(): _navigate_to(0)))
 	box.add_child(_menu_option("Problemă", func(): _navigate_to(1)))
@@ -2343,281 +1985,3 @@ func _close_menu() -> void:
 			_menu_overlay.visible = false
 			_menu_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	)
-
-
-class IconCircleButton:
-	extends Button
-	var icon_texture: Texture2D
-	var icon_color := Color.WHITE
-	var icon_scale := 0.46
-
-	func _ready() -> void:
-		texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR
-		resized.connect(queue_redraw)
-
-	func _draw() -> void:
-		if icon_texture == null:
-			return
-		var icon_size := minf(size.x, size.y) * icon_scale
-		var rect := Rect2((size.x - icon_size) * 0.5, (size.y - icon_size) * 0.5, icon_size, icon_size)
-		draw_texture_rect(icon_texture, rect, false, icon_color)
-
-class CategoryIconButton:
-	extends Button
-	var title := ""
-	var icon_texture: Texture2D
-	var icon_color := Color("#058C99")
-	var bubble_color := Color("#E9FCFD")
-	var text_color := Color("#14366A")
-
-	func _ready() -> void:
-		text = ""
-		texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR
-		resized.connect(queue_redraw)
-		toggled.connect(func(_v: bool) -> void: queue_redraw())
-
-	func _draw() -> void:
-		var k := clampf(size.y / 96.0, 0.7, 2.5)
-		var bubble_size := minf(size.x * 0.52, 38.0 * k)
-		var bubble_rect := Rect2((size.x - bubble_size) * 0.5, 12.0 * k, bubble_size, bubble_size)
-		draw_circle(bubble_rect.get_center(), bubble_size * 0.5, bubble_color)
-		if icon_texture != null:
-			var icon_size := bubble_size * 0.58
-			var icon_rect := Rect2(bubble_rect.position + (bubble_rect.size - Vector2(icon_size, icon_size)) * 0.5, Vector2(icon_size, icon_size))
-			draw_texture_rect(icon_texture, icon_rect, false, icon_color)
-		var font := get_theme_font("font")
-		var font_size := get_theme_font_size("font_size")
-		if font == null:
-			return
-		var lines := title.split("\n")
-		var line_h := float(font_size) + 2.0 * k
-		var total_h := line_h * lines.size()
-		var start_y := size.y - 18.0 * k - total_h + line_h * 0.75
-		for i in range(lines.size()):
-			var line := String(lines[i])
-			var text_size := font.get_string_size(line, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size)
-			draw_string(font, Vector2((size.x - text_size.x) * 0.5, start_y + line_h * i), line, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, text_color)
-
-class ActionButton:
-	extends Button
-	var icon_kind := ""
-	var icon_color := Color.WHITE
-	var arrow_color := Color.WHITE
-	var icon_size_dp := 28.0
-	var icon_texture: Texture2D
-	var arrow_texture: Texture2D
-
-	func _ready() -> void:
-		texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR
-		resized.connect(queue_redraw)
-
-	func _draw() -> void:
-		var h := size.y
-		if h <= 0.0:
-			return
-		var k := h / 57.0
-		var icon_size := icon_size_dp * k
-		var cx := 31.0 * k
-		var cy := h * 0.5
-		var w := maxf(2.35 * k, 1.9)
-		if icon_texture != null:
-			_draw_tinted_texture(icon_texture, Rect2(cx - icon_size * 0.5, cy - icon_size * 0.5, icon_size, icon_size), icon_color)
-		elif icon_kind == "report":
-			_draw_report_icon(Vector2(cx, cy), icon_size, w)
-		elif icon_kind == "person":
-			_draw_person_icon(Vector2(cx, cy), icon_size, w)
-		var arrow_size := 18.0 * k
-		if arrow_texture != null:
-			_draw_tinted_texture(arrow_texture, Rect2(size.x - 30.0 * k - arrow_size * 0.5, cy - arrow_size * 0.5, arrow_size, arrow_size), arrow_color)
-		else:
-			_draw_arrow(Vector2(size.x - 30.0 * k, cy), arrow_size, w)
-
-	func _draw_tinted_texture(texture: Texture2D, rect: Rect2, color: Color) -> void:
-		draw_texture_rect(texture, rect, false, color)
-
-	func _draw_report_icon(c: Vector2, d: float, w: float) -> void:
-		var x := c.x - d * 0.42
-		var y := c.y - d * 0.50
-		var body := Rect2(x, y, d * 0.58, d * 0.76)
-		draw_rect(body, icon_color, false, w)
-		draw_line(Vector2(body.position.x + body.size.x * 0.66, body.position.y), Vector2(body.position.x + body.size.x, body.position.y + body.size.y * 0.30), icon_color, w, true)
-		draw_line(Vector2(body.position.x + body.size.x, body.position.y + body.size.y * 0.30), Vector2(body.position.x + body.size.x, body.position.y + body.size.y), icon_color, w, true)
-		draw_line(Vector2(body.position.x + body.size.x * 0.18, body.position.y + body.size.y * 0.33), Vector2(body.position.x + body.size.x * 0.70, body.position.y + body.size.y * 0.33), icon_color, w, true)
-		draw_line(Vector2(body.position.x + body.size.x * 0.18, body.position.y + body.size.y * 0.54), Vector2(body.position.x + body.size.x * 0.62, body.position.y + body.size.y * 0.54), icon_color, w, true)
-		var plus_c := Vector2(c.x + d * 0.24, c.y + d * 0.28)
-		draw_arc(plus_c, d * 0.23, 0.0, TAU, 28, icon_color, w, true)
-		draw_line(plus_c + Vector2(-d * 0.11, 0), plus_c + Vector2(d * 0.11, 0), icon_color, w, true)
-		draw_line(plus_c + Vector2(0, -d * 0.11), plus_c + Vector2(0, d * 0.11), icon_color, w, true)
-
-	func _draw_person_icon(c: Vector2, d: float, w: float) -> void:
-		var head_r := d * 0.22
-		draw_arc(c + Vector2(0, -d * 0.18), head_r, 0.0, TAU, 32, icon_color, w, true)
-		draw_arc(c + Vector2(0, d * 0.34), d * 0.39, PI * 1.10, PI * 1.90, 30, icon_color, w, true)
-		draw_line(c + Vector2(-d * 0.42, d * 0.46), c + Vector2(-d * 0.42, d * 0.63), icon_color, w, true)
-		draw_line(c + Vector2(d * 0.42, d * 0.46), c + Vector2(d * 0.42, d * 0.63), icon_color, w, true)
-
-	func _draw_arrow(c: Vector2, d: float, w: float) -> void:
-		draw_line(c + Vector2(-d * 0.45, 0), c + Vector2(d * 0.42, 0), arrow_color, w, true)
-		draw_line(c + Vector2(d * 0.10, -d * 0.30), c + Vector2(d * 0.42, 0), arrow_color, w, true)
-		draw_line(c + Vector2(d * 0.10, d * 0.30), c + Vector2(d * 0.42, 0), arrow_color, w, true)
-
-
-class UploadIconButton:
-	extends Button
-	var icon_kind := "camera"
-	var icon_texture: Texture2D
-	var icon_color := Color("#12BAC2")
-
-	func _ready() -> void:
-		text = ""
-		flat = true
-		focus_mode = Control.FOCUS_NONE
-		action_mode = BaseButton.ACTION_MODE_BUTTON_PRESS
-		texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR
-		mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
-		resized.connect(queue_redraw)
-		button_down.connect(queue_redraw)
-		button_up.connect(queue_redraw)
-
-	func _draw() -> void:
-		var c := size * 0.5
-		var d: float = minf(size.x, size.y) * 0.52
-		if icon_texture != null:
-			var rect := Rect2(c - Vector2(d, d) * 0.5, Vector2(d, d))
-			draw_texture_rect(icon_texture, rect, false, icon_color)
-			return
-		var w: float = maxf(3.0, d * 0.09)
-		if icon_kind == "video":
-			_draw_video_icon(c, d, w)
-		else:
-			_draw_camera_icon(c, d, w)
-
-	func _draw_camera_icon(c: Vector2, d: float, w: float) -> void:
-		var body := Rect2(c.x - d * 0.44, c.y - d * 0.23, d * 0.88, d * 0.58)
-		draw_arc(c, d * 0.18, 0.0, TAU, 32, icon_color, w, true)
-		draw_arc(c, d * 0.14, 0.0, TAU, 32, icon_color, w, true)
-		draw_line(body.position + Vector2(d * 0.08, 0), body.position + Vector2(d * 0.22, -d * 0.18), icon_color, w, true)
-		draw_line(body.position + Vector2(d * 0.22, -d * 0.18), body.position + Vector2(d * 0.38, -d * 0.18), icon_color, w, true)
-		draw_line(body.position + Vector2(d * 0.38, -d * 0.18), body.position + Vector2(d * 0.50, 0), icon_color, w, true)
-		draw_line(body.position, body.position + Vector2(body.size.x, 0), icon_color, w, true)
-		draw_line(body.position + Vector2(body.size.x, 0), body.position + body.size, icon_color, w, true)
-		draw_line(body.position + body.size, body.position + Vector2(0, body.size.y), icon_color, w, true)
-		draw_line(body.position + Vector2(0, body.size.y), body.position, icon_color, w, true)
-
-	func _draw_video_icon(c: Vector2, d: float, w: float) -> void:
-		var left := c + Vector2(-d * 0.44, -d * 0.25)
-		var right := c + Vector2(d * 0.16, d * 0.25)
-		draw_line(left, Vector2(right.x, left.y), icon_color, w, true)
-		draw_line(Vector2(right.x, left.y), right, icon_color, w, true)
-		draw_line(right, Vector2(left.x, right.y), icon_color, w, true)
-		draw_line(Vector2(left.x, right.y), left, icon_color, w, true)
-		draw_colored_polygon(PackedVector2Array([
-			Vector2(c.x + d * 0.18, c.y - d * 0.12),
-			Vector2(c.x + d * 0.48, c.y - d * 0.30),
-			Vector2(c.x + d * 0.48, c.y + d * 0.30),
-			Vector2(c.x + d * 0.18, c.y + d * 0.12)
-		]), icon_color)
-
-class WideIconOptionButton:
-	extends Button
-	var title := ""
-	var icon_texture: Texture2D
-	var icon_color := Color("#4F83D9")
-	var text_color := Color("#02286E")
-
-	func _ready() -> void:
-		text = ""
-		texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR
-		resized.connect(queue_redraw)
-
-	func _draw() -> void:
-		var h := size.y
-		var k := clampf(h / 48.0, 0.7, 2.0)
-		var cx := 36.0 * k
-		var cy := h * 0.5
-		if icon_texture != null:
-			var icon_size := 22.0 * k
-			draw_texture_rect(icon_texture, Rect2(cx - icon_size * 0.5, cy - icon_size * 0.5, icon_size, icon_size), false, icon_color)
-		var font := get_theme_font("font")
-		var font_size := get_theme_font_size("font_size")
-		if font == null:
-			return
-		draw_string(font, Vector2(70.0 * k, cy + font_size * 0.35), title, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, text_color)
-
-class PillIconButton:
-	extends Button
-	var title := ""
-	var icon_texture: Texture2D
-
-	func _ready() -> void:
-		text = ""
-		texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR
-		resized.connect(queue_redraw)
-		toggled.connect(func(_v: bool) -> void: queue_redraw())
-
-	func _draw() -> void:
-		var h := size.y
-		var k := clampf(h / 38.0, 0.75, 2.0)
-		var selected := button_pressed
-		var col := Color.WHITE if selected else Color("#02286E")
-		var font := get_theme_font("font")
-		var font_size := get_theme_font_size("font_size")
-		var cy := h * 0.5
-		if icon_texture != null:
-			var icon_size := 12.0 * k
-			draw_texture_rect(icon_texture, Rect2(6.0 * k, cy - icon_size * 0.5, icon_size, icon_size), false, col)
-		if font != null:
-			var x := 21.0 * k
-			var lines := title.split("\n")
-			if lines.size() == 1:
-				draw_string(font, Vector2(x, cy + font_size * 0.35), title, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, col)
-			else:
-				draw_string(font, Vector2(x, cy - 1.0 * k), String(lines[0]), HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, col)
-				draw_string(font, Vector2(x, cy + font_size + 1.0 * k), String(lines[1]), HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, col)
-
-class LogoMark:
-	extends Control
-	func _draw() -> void:
-		var s := get_rect().size
-		var k := minf(s.x / 82.0, s.y / 64.0)
-		var ox := (s.x - 82.0 * k) * 0.5
-		var oy := (s.y - 64.0 * k) * 0.5
-		var p0 := Vector2(ox + 14.0 * k, oy + 34.0 * k)
-		var p1 := Vector2(ox + 40.0 * k, oy + 10.0 * k)
-		var p2 := Vector2(ox + 66.0 * k, oy + 34.0 * k)
-		draw_polyline(PackedVector2Array([p0, p1, p2]), Color("#0B46B7"), 6.0 * k, true)
-		draw_line(Vector2(ox + 25.0 * k, oy + 34.0 * k), Vector2(ox + 25.0 * k, oy + 54.0 * k), Color("#12BAC2"), 6.0 * k, true)
-		draw_line(Vector2(ox + 55.0 * k, oy + 34.0 * k), Vector2(ox + 55.0 * k, oy + 54.0 * k), Color("#12BAC2"), 6.0 * k, true)
-		draw_line(Vector2(ox + 25.0 * k, oy + 54.0 * k), Vector2(ox + 55.0 * k, oy + 54.0 * k), Color("#12BAC2"), 6.0 * k, true)
-		var bolt := PackedVector2Array([Vector2(ox + 45.0 * k, oy + 14.0 * k), Vector2(ox + 34.0 * k, oy + 36.0 * k), Vector2(ox + 45.0 * k, oy + 36.0 * k), Vector2(ox + 36.0 * k, oy + 58.0 * k), Vector2(ox + 60.0 * k, oy + 29.0 * k), Vector2(ox + 48.0 * k, oy + 29.0 * k)])
-		draw_colored_polygon(bolt, Color("#12BAC2"))
-
-class GradientBackground:
-	extends Control
-	func _draw() -> void:
-		var r := get_rect()
-		draw_rect(r, Color("#F7FCFF"))
-		for i in range(24):
-			var t := float(i) / 23.0
-			var c := Color("#E4F8FF").lerp(Color("#FDFEFF"), t)
-			draw_rect(Rect2(0, r.size.y * t, r.size.x, r.size.y / 23.0 + 2.0), c)
-
-class HillsBackground:
-	extends Control
-	func _draw() -> void:
-		var s := get_rect().size
-		var k := minf(s.x / 390.0, s.y / 844.0)
-		k = clampf(k, 0.9, 1.25)
-		var y := s.y - 104.0 * k
-		var far := PackedVector2Array([Vector2(0, y + 28 * k), Vector2(0, y), Vector2(50 * k, y - 16 * k), Vector2(105 * k, y + 2 * k), Vector2(160 * k, y - 25 * k), Vector2(230 * k, y - 5 * k), Vector2(300 * k, y - 22 * k), Vector2(s.x, y), Vector2(s.x, s.y), Vector2(0, s.y)])
-		draw_colored_polygon(far, Color("#AEE5F1"))
-		var near := PackedVector2Array([Vector2(0, s.y), Vector2(0, y + 34 * k), Vector2(35 * k, y + 10 * k), Vector2(78 * k, y + 30 * k), Vector2(130 * k, y + 3 * k), Vector2(180 * k, y + 28 * k), Vector2(225 * k, y + 8 * k), Vector2(280 * k, y + 25 * k), Vector2(335 * k, y + 6 * k), Vector2(s.x, y + 22 * k), Vector2(s.x, s.y)])
-		draw_colored_polygon(near, Color("#3DB8CA"))
-		var step := int(44 * k)
-		if step <= 0:
-			step = 44
-		for x in range(int(12 * k), int(s.x), step):
-			var house_y := s.y - 34 * k - (x % 3) * 4 * k
-			draw_rect(Rect2(x, house_y, 28 * k, 24 * k), Color("#EEF9FD"))
-			draw_colored_polygon(PackedVector2Array([Vector2(x - 3 * k, house_y), Vector2(x + 14 * k, house_y - 12 * k), Vector2(x + 31 * k, house_y)]), Color("#206EA7"))
-			draw_rect(Rect2(x + 10 * k, house_y + 11 * k, 7 * k, 13 * k), Color("#167F9B"))
