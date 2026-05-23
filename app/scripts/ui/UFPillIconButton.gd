@@ -71,18 +71,20 @@ func _draw() -> void:
 
 func _draw_rounded_mask(fill_col: Color, border_col: Color, radius: float, border_width: float) -> void:
 	var r := Rect2(Vector2.ZERO, size)
+	_draw_style_rect(r, radius, border_col)
 	var inner := r.grow(-border_width)
-	_draw_rounded_rect(r, radius, border_col)
-	_draw_rounded_rect(inner, maxf(0.0, radius - border_width), fill_col)
-
-func _draw_rounded_rect(rect: Rect2, radius: float, color: Color) -> void:
-	var r := minf(radius, minf(rect.size.x, rect.size.y) * 0.5)
-	if r <= 0.0:
-		draw_rect(rect, color, true)
+	if inner.size.x <= 0.0 or inner.size.y <= 0.0:
 		return
-	draw_rect(Rect2(rect.position + Vector2(r, 0.0), Vector2(rect.size.x - 2.0 * r, rect.size.y)), color, true)
-	draw_rect(Rect2(rect.position + Vector2(0.0, r), Vector2(rect.size.x, rect.size.y - 2.0 * r)), color, true)
-	draw_circle(rect.position + Vector2(r, r), r, color)
-	draw_circle(rect.position + Vector2(rect.size.x - r, r), r, color)
-	draw_circle(rect.position + Vector2(r, rect.size.y - r), r, color)
-	draw_circle(rect.position + Vector2(rect.size.x - r, rect.size.y - r), r, color)
+	_draw_style_rect(inner, maxf(0.0, radius - border_width), fill_col)
+
+func _draw_style_rect(rect: Rect2, radius: float, color: Color) -> void:
+	var style := StyleBoxFlat.new()
+	style.bg_color = color
+	style.border_color = color
+	style.set_border_width_all(0)
+	style.set_corner_radius_all(int(round(radius)))
+	style.content_margin_left = 0
+	style.content_margin_right = 0
+	style.content_margin_top = 0
+	style.content_margin_bottom = 0
+	draw_style_box(style, rect)

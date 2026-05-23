@@ -93,6 +93,9 @@ var _native_video_timer: Timer
 var _native_video_status_label: Label
 var _native_video_record_button: Button
 var _description_counter: Label
+var _media_carousel_scroll: ScrollContainer
+var _media_carousel_dots: Array[PanelContainer] = []
+var _media_page_index := 0
 var _saved_requests: Array = []
 var _permission_notice_overlay: Control
 var _initial_intro_pending := true
@@ -475,7 +478,7 @@ func _show_native_camera_overlay() -> void:
 	center.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_native_camera_overlay.add_child(center)
 	var panel := PanelContainer.new()
-	panel.custom_minimum_size = Vector2(_dp(340), _dp(650))
+	panel.custom_minimum_size = Vector2(_dp(340), _dp(510))
 	panel.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 	panel.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	panel.mouse_filter = Control.MOUSE_FILTER_STOP
@@ -492,9 +495,10 @@ func _show_native_camera_overlay() -> void:
 	margin.add_child(box)
 	box.add_child(_headline("Fă o poză", 20))
 	var preview_shell := PanelContainer.new()
-	preview_shell.custom_minimum_size = Vector2(_dp(306), _dp(470))
+	preview_shell.custom_minimum_size = Vector2(_dp(306), _dp(306))
 	preview_shell.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	preview_shell.add_theme_stylebox_override("panel", _style(Color("#08111E"), Color("#102B4D"), 18, 1))
+	preview_shell.clip_contents = true
+	preview_shell.add_theme_stylebox_override("panel", _frame_style(FIX_GREEN.darkened(0.12), Color(0, 0, 0, 0), 18, 0))
 	box.add_child(preview_shell)
 	_native_camera_preview = TextureRect.new()
 	_native_camera_preview.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -632,12 +636,21 @@ func _capture_native_camera_photo() -> void:
 		return
 	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(LOCAL_MEDIA_DIR))
 	var target := "%s/photo_%d.png" % [LOCAL_MEDIA_DIR, Time.get_unix_time_from_system()]
-	var save_error := _native_camera_last_image.save_png(target)
+	var captured_image := _center_square_image(_native_camera_last_image)
+	var save_error := captured_image.save_png(target)
 	_close_camera_capture(true)
 	if save_error == OK:
 		_add_media_item(target, "photo")
 	else:
 		_show_small_notice("Eroare salvare", "Poza a fost capturată, dar nu a putut fi salvată local.")
+
+func _center_square_image(source: Image) -> Image:
+	if source == null or source.is_empty():
+		return Image.new()
+	var side := mini(source.get_width(), source.get_height())
+	var x := int((source.get_width() - side) / 2)
+	var y := int((source.get_height() - side) / 2)
+	return source.get_region(Rect2i(x, y, side, side))
 
 func _close_camera_capture(close_overlay: bool = true) -> void:
 	_native_video_recording = false
@@ -1089,25 +1102,6 @@ func _media() -> void:
 	box.add_child(_headline("Adaugă poze", 22))
 	box.add_child(_center_text("Arată-ne problema pentru un\ndiagnostic mai rapid.", 12))
 
-	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", _dp(8))
-	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	box.add_child(row)
-
-	var photo_button := _upload_card("Fă o poză", LUCIDE_CAMERA_PATH)
-	row.add_child(photo_button)
-	photo_button.pressed.connect(func() -> void:
-		_open_camera_capture()
-	)
-
-	var gallery_button := _upload_card("Din galerie", LUCIDE_GALLERY_PATH)
-	row.add_child(gallery_button)
-	gallery_button.pressed.connect(func() -> void:
-		_open_gallery_picker()
-	)
-
-	box.add_child(_media_preview_stack())
-
 	var desc_panel := PanelContainer.new()
 	desc_panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	desc_panel.add_theme_stylebox_override("panel", _style(Color.WHITE, BORDER, 14, 1))
@@ -1152,6 +1146,25 @@ func _media() -> void:
 	_description_counter.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	_description_counter.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	desc_box.add_child(_description_counter)
+
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", _dp(8))
+	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	box.add_child(row)
+
+	var photo_button := _upload_card("Fă o poză", LUCIDE_CAMERA_PATH)
+	row.add_child(photo_button)
+	photo_button.pressed.connect(func() -> void:
+		_open_camera_capture()
+	)
+
+	var gallery_button := _upload_card("Din galerie", LUCIDE_GALLERY_PATH)
+	row.add_child(gallery_button)
+	gallery_button.pressed.connect(func() -> void:
+		_open_gallery_picker()
+	)
+
+	box.add_child(_media_preview_stack())
 
 	var finalize_button := _primary_button("Finalizează", func() -> void:
 		_finalize_request()
@@ -1646,13 +1659,10 @@ func _pill_icon(t: String, icon_path: String, selected: bool) -> Button:
 	return b
 
 func _apply_pill_icon_style(b: Button) -> void:
-	var selected := b.button_pressed
-	var fill := BLUE if selected else Color.WHITE
-	var border := Color.WHITE if selected else BLUE
-	b.add_theme_stylebox_override("normal", _style(fill, border, 9, 2))
-	b.add_theme_stylebox_override("hover", _style(fill, border, 9, 2))
-	b.add_theme_stylebox_override("focus", _style(fill, border, 9, 2))
-	b.add_theme_stylebox_override("pressed", _style(fill, border, 9, 2))
+	b.add_theme_stylebox_override("normal", _transparent_style())
+	b.add_theme_stylebox_override("hover", _transparent_style())
+	b.add_theme_stylebox_override("focus", _transparent_style())
+	b.add_theme_stylebox_override("pressed", _transparent_style())
 
 func _mini_chip(t: String, icon_path: String) -> PanelContainer:
 	var p := PanelContainer.new()
@@ -1703,18 +1713,128 @@ func _upload_card(t: String, _icon_path: String = "") -> Button:
 	_make_bouncy(b)
 	return b
 
-func _media_preview_stack() -> VBoxContainer:
-	var stack := VBoxContainer.new()
-	stack.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	stack.add_theme_constant_override("separation", _dp(8))
+func _media_preview_stack() -> Control:
+	var outer := VBoxContainer.new()
+	outer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	outer.add_theme_constant_override("separation", _dp(6))
+
+	_media_carousel_scroll = ScrollContainer.new()
+	var preview_size := _media_preview_size()
+	_media_carousel_scroll.custom_minimum_size = Vector2(preview_size, preview_size)
+	_media_carousel_scroll.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	_media_carousel_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_SHOW_NEVER
+	_media_carousel_scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	_media_carousel_scroll.follow_focus = false
+	_media_carousel_scroll.mouse_filter = Control.MOUSE_FILTER_STOP
+	_media_carousel_scroll.gui_input.connect(_on_media_carousel_input)
+	_hide_media_carousel_scrollbar()
+	outer.add_child(_media_carousel_scroll)
+
+	var row := HBoxContainer.new()
+	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_theme_constant_override("separation", 0)
+	_media_carousel_scroll.add_child(row)
+
 	var media := _selected_media()
 	if media.is_empty():
-		stack.add_child(_media_preview_card(DEMO_PHOTO_PATH, "photo", -1))
-		return stack
+		_media_page_index = 0
+		var empty_card := _media_preview_card("", "photo", -1)
+		empty_card.custom_minimum_size = Vector2(preview_size, preview_size)
+		row.add_child(empty_card)
+		return outer
+
+	_media_page_index = clampi(_media_page_index, 0, media.size() - 1)
 	for i in range(media.size()):
 		var item: Variant = media[i]
-		stack.add_child(_media_preview_card(_media_path_from_item(item), _media_kind_from_item(item), i))
-	return stack
+		var card := _media_preview_card(_media_path_from_item(item), _media_kind_from_item(item), i)
+		card.custom_minimum_size = Vector2(preview_size, preview_size)
+		row.add_child(card)
+
+	outer.add_child(_media_dots(media.size()))
+	call_deferred("_restore_media_carousel_position")
+	return outer
+
+func _media_preview_size() -> int:
+	return min(_content_width(), _dp(260))
+
+func _hide_media_carousel_scrollbar() -> void:
+	if not is_instance_valid(_media_carousel_scroll):
+		return
+	var hbar := _media_carousel_scroll.get_h_scroll_bar()
+	if hbar == null:
+		return
+	hbar.visible = false
+	hbar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hbar.custom_minimum_size = Vector2.ZERO
+	hbar.modulate = Color(1, 1, 1, 0)
+
+func _on_media_carousel_input(event: InputEvent) -> void:
+	if event is InputEventScreenTouch:
+		var touch := event as InputEventScreenTouch
+		if not touch.pressed:
+			call_deferred("_snap_media_carousel_to_nearest")
+	elif event is InputEventMouseButton:
+		var mouse := event as InputEventMouseButton
+		if mouse.button_index == MOUSE_BUTTON_LEFT and not mouse.pressed:
+			call_deferred("_snap_media_carousel_to_nearest")
+
+func _restore_media_carousel_position() -> void:
+	if not is_instance_valid(_media_carousel_scroll):
+		return
+	_hide_media_carousel_scrollbar()
+	var bar := _media_carousel_scroll.get_h_scroll_bar()
+	if bar == null:
+		return
+	bar.value = float(_media_page_index * max(1, _media_preview_size()))
+	_update_media_dots()
+	if not bar.value_changed.is_connected(_on_media_carousel_value_changed):
+		bar.value_changed.connect(_on_media_carousel_value_changed)
+
+func _on_media_carousel_value_changed(value: float) -> void:
+	var page_width: float = max(1.0, float(_media_preview_size()))
+	_media_page_index = clampi(int(round(value / page_width)), 0, max(0, _selected_media().size() - 1))
+	_update_media_dots()
+
+func _snap_media_carousel_to_nearest() -> void:
+	if not is_instance_valid(_media_carousel_scroll):
+		return
+	var count := _selected_media().size()
+	if count <= 0:
+		return
+	var bar := _media_carousel_scroll.get_h_scroll_bar()
+	if bar == null:
+		return
+	var page_width: float = max(1.0, float(_media_preview_size()))
+	_media_page_index = clampi(int(round(float(bar.value) / page_width)), 0, count - 1)
+	var target := float(_media_page_index) * page_width
+	var tween := create_tween()
+	tween.tween_property(bar, "value", target, 0.18).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+	_update_media_dots()
+
+func _media_dots(count: int) -> HBoxContainer:
+	_media_carousel_dots.clear()
+	var dots := HBoxContainer.new()
+	dots.alignment = BoxContainer.ALIGNMENT_CENTER
+	dots.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	dots.add_theme_constant_override("separation", _dp(5))
+	for i in range(count):
+		var dot := PanelContainer.new()
+		dot.custom_minimum_size = Vector2(_dp(7), _dp(7))
+		dot.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		dot.add_theme_stylebox_override("panel", _frame_style(Color("#B8C8D8"), Color("#B8C8D8"), 50, 0))
+		dots.add_child(dot)
+		_media_carousel_dots.append(dot)
+	_update_media_dots()
+	return dots
+
+func _update_media_dots() -> void:
+	for i in range(_media_carousel_dots.size()):
+		var dot := _media_carousel_dots[i]
+		if not is_instance_valid(dot):
+			continue
+		var active := i == _media_page_index
+		dot.custom_minimum_size = Vector2(_dp(18 if active else 7), _dp(7))
+		dot.add_theme_stylebox_override("panel", _frame_style(FIX_GREEN if active else Color("#B8C8D8"), FIX_GREEN if active else Color("#B8C8D8"), 50, 0))
 
 func _video_thumbnail_from_metadata(path: String) -> Texture2D:
 	if path.strip_edges() == "" or not FileAccess.file_exists(path):
@@ -1730,11 +1850,15 @@ func _video_thumbnail_from_metadata(path: String) -> Texture2D:
 
 func _media_preview_card(path: String, kind: String, index: int) -> Control:
 	var preview_wrap := Control.new()
-	preview_wrap.custom_minimum_size.y = _dp(172)
+	var preview_size := _media_preview_size()
+	preview_wrap.custom_minimum_size = Vector2(preview_size, preview_size)
 	preview_wrap.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	preview_wrap.mouse_filter = Control.MOUSE_FILTER_PASS
 	var panel := PanelContainer.new()
 	panel.set_anchors_preset(Control.PRESET_FULL_RECT)
-	panel.add_theme_stylebox_override("panel", _style(Color("#E6EDF3"), Color("#C8D3DE"), 10, 1))
+	panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	panel.clip_contents = true
+	panel.add_theme_stylebox_override("panel", _frame_style(Color("#E6EDF3"), Color("#C8D3DE"), 10, 1))
 	preview_wrap.add_child(panel)
 	var tex: Texture2D = null
 	if kind == "photo":
@@ -1745,21 +1869,26 @@ func _media_preview_card(path: String, kind: String, index: int) -> Control:
 		var img := TextureRect.new()
 		img.set_anchors_preset(Control.PRESET_FULL_RECT)
 		img.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-		img.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		img.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
 		img.texture = tex
 		img.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		panel.add_child(img)
 	else:
-		panel.add_child(_missing_media_label("Imaginea nu mai există"))
+		panel.add_child(_missing_media_label("Nicio imagine disponibila"))
 	if index >= 0:
 		var action := UF_ICON_CIRCLE_BUTTON_SCRIPT.new()
+		action.mouse_filter = Control.MOUSE_FILTER_STOP
 		action.icon_texture = _load_texture(LUCIDE_X_PATH)
 		action.icon_color = BLUE
 		action.circle_color = Color.WHITE
 		action.icon_scale = 0.66
 		action.circle_ratio = 1.0
 		action.custom_minimum_size = Vector2(_dp(46), _dp(46))
-		action.position = Vector2(_content_width() - _dp(54), _dp(8))
+		action.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+		action.offset_left = -_dp(54)
+		action.offset_right = -_dp(8)
+		action.offset_top = _dp(8)
+		action.offset_bottom = _dp(54)
 		action.z_index = 50
 		action.add_theme_stylebox_override("normal", _transparent_style())
 		action.add_theme_stylebox_override("hover", _transparent_style())
@@ -1772,9 +1901,11 @@ func _media_preview_card(path: String, kind: String, index: int) -> Control:
 
 func _missing_media_label(text: String) -> Label:
 	var label := Label.new()
+	label.set_anchors_preset(Control.PRESET_FULL_RECT)
 	label.text = text
 	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	label.add_theme_color_override("font_color", Color("#6A7C91"))
 	_apply_font(label, 15)
 	return label
@@ -1822,6 +1953,14 @@ func _style(bg: Color, border: Color, radius: int, width: int) -> StyleBoxFlat:
 	s.content_margin_right = _dp(14)
 	s.content_margin_top = _dp(9)
 	s.content_margin_bottom = _dp(9)
+	return s
+
+func _frame_style(bg: Color, border: Color, radius: int, width: int) -> StyleBoxFlat:
+	var s := _style(bg, border, radius, width)
+	s.content_margin_left = 0
+	s.content_margin_right = 0
+	s.content_margin_top = 0
+	s.content_margin_bottom = 0
 	return s
 
 func _build_top_hit_buttons() -> void:
