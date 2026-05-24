@@ -51,6 +51,7 @@ const UF_WIDE_ICON_OPTION_BUTTON_SCRIPT := preload("res://app/scripts/ui/UFWideI
 const UF_PILL_ICON_BUTTON_SCRIPT := preload("res://app/scripts/ui/UFPillIconButton.gd")
 const UF_GRADIENT_BACKGROUND_SCRIPT := preload("res://app/scripts/background/UFGradientBackground.gd")
 const UF_HILLS_BACKGROUND_SCRIPT := preload("res://app/scripts/background/UFHillsBackground.gd")
+const PROVIDER_REQUESTS_FLOW_SCRIPT := preload("res://app/scripts/provider/ProviderRequestsFlow.gd")
 
 var _page_index := 0
 var _scale := 1.0
@@ -776,7 +777,7 @@ func _is_confirm_event(event: InputEvent) -> bool:
 	return false
 
 func _navigate_to(index: int) -> void:
-	var next_index := clampi(index, 0, 2)
+	var next_index := clampi(index, 0, 3)
 	if next_index == _page_index or _is_transitioning:
 		_close_menu()
 		return
@@ -797,10 +798,21 @@ func _navigate_to(index: int) -> void:
 		_history.clear()
 		_show_page(1)
 		return
+	if next_index == 3:
+		_history.clear()
+		_show_page(3)
+		return
 	_show_page(next_index)
 
 func _go_back() -> void:
 	_close_menu()
+	if _page_index == 3:
+		var provider_flow := _content.get_child(0) if is_instance_valid(_content) and _content.get_child_count() > 0 else null
+		if provider_flow != null and provider_flow.has_method("_go_back_in_flow") and bool(provider_flow.call("_go_back_in_flow")):
+			return
+		_history.clear()
+		_show_page(0)
+		return
 	if _page_index == 2:
 		_show_page(1)
 		return
@@ -811,7 +823,7 @@ func _go_back() -> void:
 	_show_page(0)
 
 func _show_page(index: int, animate: bool = true) -> void:
-	var next_index := clampi(index, 0, 2)
+	var next_index := clampi(index, 0, 3)
 	if not is_instance_valid(_content):
 		return
 	if animate and _content.get_child_count() > 0:
@@ -828,7 +840,7 @@ func _show_page(index: int, animate: bool = true) -> void:
 	_populate_page(next_index, animate)
 
 func _populate_page(index: int, animate: bool = true) -> void:
-	_page_index = clampi(index, 0, 2)
+	_page_index = clampi(index, 0, 3)
 	if not is_instance_valid(_content):
 		return
 	for c in _content.get_children():
@@ -841,6 +853,7 @@ func _populate_page(index: int, animate: bool = true) -> void:
 		0: _home()
 		1: _problem()
 		2: _media()
+		3: _provider_requests()
 	if animate:
 		_animate_page_intro()
 
@@ -919,7 +932,7 @@ func _home() -> void:
 	box.add_child(_center_text("Găsește rapid firme verificate\npentru intervenții.", 15))
 	box.add_child(_gap(24))
 	box.add_child(_primary_button("Raportează o problemă", func(): _navigate_to(1)))
-	box.add_child(_secondary_button("Sunt prestator / firmă", func(): pass))
+	box.add_child(_secondary_button("Sunt prestator / firmă", func(): _navigate_to(3)))
 	box.add_child(_popular_categories_panel())
 	var chips := HBoxContainer.new()
 	chips.add_theme_constant_override("separation", _dp(7))
@@ -928,6 +941,25 @@ func _home() -> void:
 	chips.add_child(_mini_chip("Răspuns\nrapid", LUCIDE_CLOCK_PATH))
 	chips.add_child(_mini_chip("Oferte\nclare", LUCIDE_FILE_TEXT_PATH))
 	box.add_child(_gap(54))
+
+func _provider_requests() -> void:
+	_title.text = ""
+	var provider_flow := PROVIDER_REQUESTS_FLOW_SCRIPT.new()
+	provider_flow.set_anchors_preset(Control.PRESET_FULL_RECT)
+	provider_flow.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	provider_flow.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	provider_flow.custom_minimum_size = _content.size
+	provider_flow.setup(_saved_requests, _scale, _app_font)
+	provider_flow.back_requested.connect(func() -> void:
+		_history.clear()
+		_show_page(0)
+	)
+	provider_flow.requests_changed.connect(func(updated_requests: Array) -> void:
+		_saved_requests = updated_requests.duplicate(true)
+		_save_local_data()
+	)
+	_content.add_child(provider_flow)
+	provider_flow.call_deferred("refresh_view")
 
 func _problem() -> void:
 	_title.text = ""
@@ -2066,6 +2098,7 @@ func _build_menu_overlay() -> void:
 	box.add_child(_menu_option("Acasă", func(): _navigate_to(0)))
 	box.add_child(_menu_option("Problemă", func(): _navigate_to(1)))
 	box.add_child(_menu_option("Poze", func(): _navigate_to(2)))
+	box.add_child(_menu_option("Prestator", func(): _navigate_to(3)))
 	box.add_child(_secondary_button("Închide", _close_menu))
 
 func _menu_option(text: String, cb: Callable) -> Button:
