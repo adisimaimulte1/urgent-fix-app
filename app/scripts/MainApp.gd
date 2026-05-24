@@ -1,5 +1,7 @@
 extends Control
 
+signal logout_requested
+
 const DESIGN_WIDTH := 390.0
 const DESIGN_HEIGHT := 844.0
 const MAX_CONTENT_WIDTH := 340.0
@@ -70,6 +72,8 @@ var _menu_open := false
 var _history: Array[int] = []
 var _rebuild_pending := false
 var _app_font: Font
+var _auth_profile: Dictionary = {}
+var _account_type := "client"
 var _form_data: Dictionary = {
 	"problem_category": "",
 	"other_issue": "",
@@ -102,6 +106,31 @@ var _permission_notice_overlay: Control
 var _initial_intro_pending := true
 var _building_initial_intro := false
 var _is_transitioning := false
+
+func set_auth_profile(profile: Dictionary) -> void:
+	_auth_profile = profile.duplicate(true)
+	_account_type = _normalize_account_type(str(_auth_profile.get("account_type", "client")))
+	set_meta("auth_profile", _auth_profile)
+	set_meta("account_type", _account_type)
+	if is_inside_tree() and is_instance_valid(_content):
+		_rebuild()
+
+func set_account_profile(profile: Dictionary) -> void:
+	set_auth_profile(profile)
+
+func _normalize_account_type(value: String) -> String:
+	var cleaned := value.strip_edges().to_lower()
+	match cleaned:
+		"company", "firma", "firmă", "provider", "prestator":
+			return "company"
+		_:
+			return "client"
+
+func _is_client_account() -> bool:
+	return _account_type != "company"
+
+func _is_company_account() -> bool:
+	return _account_type == "company"
 
 func _enter_tree() -> void:
 	RenderingServer.set_default_clear_color(Color.WHITE)
@@ -778,6 +807,12 @@ func _is_confirm_event(event: InputEvent) -> bool:
 
 func _navigate_to(index: int) -> void:
 	var next_index := clampi(index, 0, 3)
+	if next_index == 1 and _is_company_account():
+		_close_menu()
+		return
+	if next_index == 3 and _is_client_account():
+		_close_menu()
+		return
 	if next_index == _page_index or _is_transitioning:
 		_close_menu()
 		return
@@ -931,8 +966,19 @@ func _home() -> void:
 	box.add_child(_headline("Ai o problemă\nîn casă?", 31))
 	box.add_child(_center_text("Găsește rapid firme verificate\npentru intervenții.", 15))
 	box.add_child(_gap(24))
-	box.add_child(_primary_button("Raportează o problemă", func(): _navigate_to(1)))
-	box.add_child(_secondary_button("Sunt prestator / firmă", func(): _navigate_to(3)))
+	var report_button := _primary_button("Raportează o problemă", func(): _navigate_to(1))
+	if _is_company_account():
+		_lock_action_button(report_button)
+	else:
+		_apply_continue_button_visual(report_button, true)
+	box.add_child(report_button)
+
+	var provider_button := _secondary_button("Sunt prestator / firmă", func(): _navigate_to(3))
+	if _is_client_account():
+		_lock_action_button(provider_button)
+	else:
+		_apply_continue_button_visual(provider_button, true)
+	box.add_child(provider_button)
 	box.add_child(_popular_categories_panel())
 	var chips := HBoxContainer.new()
 	chips.add_theme_constant_override("separation", _dp(7))
@@ -1565,6 +1611,15 @@ func _secondary_button(t: String, cb: Callable) -> Button:
 	_make_bouncy(b)
 	return b
 
+func _lock_action_button(button: Button) -> void:
+	if not is_instance_valid(button):
+		return
+	button.disabled = true
+	button.modulate.a = 1.0
+	button.mouse_default_cursor_shape = Control.CURSOR_FORBIDDEN
+	button.focus_mode = Control.FOCUS_NONE
+	_apply_continue_button_visual(button, false)
+
 func _back_button() -> Button:
 	var b := UF_ICON_CIRCLE_BUTTON_SCRIPT.new()
 	b.action_mode = BaseButton.ACTION_MODE_BUTTON_PRESS
@@ -2096,10 +2151,12 @@ func _build_menu_overlay() -> void:
 	box.add_child(_center_text("Navigare rapidă prin aplicație", 11))
 	box.add_child(_gap(2))
 	box.add_child(_menu_option("Acasă", func(): _navigate_to(0)))
-	box.add_child(_menu_option("Problemă", func(): _navigate_to(1)))
-	box.add_child(_menu_option("Poze", func(): _navigate_to(2)))
-	box.add_child(_menu_option("Prestator", func(): _navigate_to(3)))
+	box.add_child(_menu_option("Logout", _request_logout))
 	box.add_child(_secondary_button("Închide", _close_menu))
+
+func _request_logout() -> void:
+	_close_menu()
+	logout_requested.emit()
 
 func _menu_option(text: String, cb: Callable) -> Button:
 	var b := Button.new()

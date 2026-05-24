@@ -16,6 +16,7 @@ const CARD := Color.WHITE
 const LOGO_PATH := "res://assets/icon/logo_cropped.png"
 const FALLBACK_LOGO_PATH := "res://assets/icon/adaptive_foreground.png"
 const DEMO_PHOTO_PATH := "res://app/assets/demo/plumbing_preview.png"
+const UF_KEYBOARD_AWARE_SCROLL_SCRIPT := preload("res://app/scripts/ui/UFKeyboardAwareScroll.gd")
 
 var _requests: Array = []
 var _time_filter := "Toate"
@@ -301,6 +302,7 @@ func _show_dropdown_popup(title_text: String, values: Array[String], selected: S
 		)
 		_make_bouncy(option)
 		box.add_child(option)
+
 	panel.scale = Vector2(0.92, 0.92)
 	panel.modulate.a = 0.0
 	var tween := create_tween()
@@ -854,10 +856,24 @@ func _show_proposal_popup(request_id: String) -> void:
 	dim.set_anchors_preset(Control.PRESET_FULL_RECT)
 	dim.mouse_filter = Control.MOUSE_FILTER_STOP
 	_notice_overlay.add_child(dim)
+	var scroll := UF_KEYBOARD_AWARE_SCROLL_SCRIPT.new()
+	scroll.name = "ProposalKeyboardScroll"
+	scroll.set_anchors_preset(Control.PRESET_FULL_RECT)
+	scroll.mouse_filter = Control.MOUSE_FILTER_PASS
+	scroll.follow_focus = true
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
+	_notice_overlay.add_child(scroll)
+	var scroll_body := VBoxContainer.new()
+	scroll_body.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll_body.custom_minimum_size = get_viewport_rect().size
+	scroll.add_child(scroll_body)
 	var center := CenterContainer.new()
-	center.set_anchors_preset(Control.PRESET_FULL_RECT)
+	center.custom_minimum_size = get_viewport_rect().size
+	center.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	center.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	center.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_notice_overlay.add_child(center)
+	scroll_body.add_child(center)
 	var panel := PanelContainer.new()
 	panel.custom_minimum_size = Vector2(_dp(315), 0)
 	panel.size_flags_horizontal = Control.SIZE_SHRINK_CENTER

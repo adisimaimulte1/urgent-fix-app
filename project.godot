@@ -11,7 +11,7 @@ config_version=5
 [application]
 
 config/name="UrgentFix"
-run/main_scene="uid://mainapp"
+run/main_scene="res://app/scenes/AuthStartup.tscn"
 config/features=PackedStringArray("4.6", "Mobile")
 run/max_fps=60
 boot_splash/bg_color=Color(1, 1, 1, 1)
