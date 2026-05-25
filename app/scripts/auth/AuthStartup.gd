@@ -325,9 +325,14 @@ func _database_profile(profile: Dictionary) -> Dictionary:
 		out["created_at"] = Time.get_datetime_string_from_system()
 	out.erase("id_token")
 	out.erase("auth_mode")
+	out["display_name"] = str(profile.get("display_name", out.get("display_name", ""))).strip_edges()
+	out["phone"] = str(profile.get("phone", out.get("phone", ""))).strip_edges()
 	if account_type != "company":
 		out.erase("company_name")
-		out.erase("phone")
+	else:
+		var company_name := str(profile.get("company_name", out.get("company_name", out.get("display_name", "")))).strip_edges()
+		out["company_name"] = company_name
+		out["display_name"] = company_name if company_name != "" else str(out.get("display_name", "")).strip_edges()
 	return out
 
 func _on_main_logout_requested() -> void:

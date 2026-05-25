@@ -3,6 +3,8 @@ extends Node
 signal user_profile_loaded(profile: Dictionary)
 signal user_profile_saved(profile: Dictionary)
 signal requests_loaded(requests: Array)
+signal requests_listener_started
+signal requests_listener_stopped
 signal request_saved(request: Dictionary)
 signal requests_saved(requests: Array)
 signal firestore_failed(message: String)
@@ -15,23 +17,55 @@ var _pending_request: Dictionary = {}
 var _pending_requests: Array = []
 var _pending_profile: Dictionary = {}
 var _id_token := ""
+var _requests_listener_timer: Timer
+var _requests_listener_interval := 2.5
+var _requests_listener_running := false
+var _request_queue: Array = []
+var _request_in_progress := false
 
 func _ready() -> void:
 	_http = HTTPRequest.new()
 	_http.timeout = 25.0
 	add_child(_http)
 	_http.request_completed.connect(_on_request_completed)
+	_requests_listener_timer = Timer.new()
+	_requests_listener_timer.one_shot = false
+	_requests_listener_timer.wait_time = _requests_listener_interval
+	add_child(_requests_listener_timer)
+	_requests_listener_timer.timeout.connect(_on_requests_listener_tick)
 
 func set_id_token(token: String) -> void:
 	_id_token = token
 
+func start_requests_listener(interval_seconds: float = 2.5) -> void:
+	_requests_listener_interval = clampf(interval_seconds, 1.0, 30.0)
+	_requests_listener_running = true
+	if is_instance_valid(_requests_listener_timer):
+		_requests_listener_timer.wait_time = _requests_listener_interval
+		_requests_listener_timer.start()
+	requests_listener_started.emit()
+	load_requests(true)
+
+func stop_requests_listener() -> void:
+	_requests_listener_running = false
+	if is_instance_valid(_requests_listener_timer):
+		_requests_listener_timer.stop()
+	requests_listener_stopped.emit()
+
+func _on_requests_listener_tick() -> void:
+	if not _requests_listener_running:
+		return
+	if _request_in_progress:
+		return
+	if is_instance_valid(_http) and _http.get_http_client_status() != HTTPClient.STATUS_DISCONNECTED:
+		return
+	load_requests(true)
+
 func load_user_profile(uid: String) -> void:
 	if not _can_request():
 		return
-	_mode = "load_user_profile"
-	_pending_profile.clear()
 	var url := "%s/users/%s" % [FirebaseConfig.firestore_base_url(), uid.uri_encode()]
-	_send(url, HTTPClient.METHOD_GET, "")
+	_dispatch("load_user_profile", url, HTTPClient.METHOD_GET, "", {}, [], {})
 
 func save_user_profile(profile: Dictionary) -> void:
 	if not _can_request():
@@ -40,28 +74,21 @@ func save_user_profile(profile: Dictionary) -> void:
 	if uid == "":
 		firestore_failed.emit("Profilul nu are UID.")
 		return
-	_mode = "save_user_profile"
-	_pending_profile = profile.duplicate(true)
 	var url := "%s/users/%s" % [FirebaseConfig.firestore_base_url(), uid.uri_encode()]
-	_send(url, HTTPClient.METHOD_PATCH, JSON.stringify({"fields": _to_firestore_fields(_pending_profile)}))
+	_dispatch("save_user_profile", url, HTTPClient.METHOD_PATCH, JSON.stringify({"fields": _to_firestore_fields(profile)}), {}, [], profile.duplicate(true))
 
-func load_requests() -> void:
-	if not _can_request():
+func load_requests(silent: bool = false) -> void:
+	if not _can_request(silent):
 		return
-	_mode = "load_requests"
-	_pending_request.clear()
-	_pending_requests.clear()
 	var url := "%s/requests" % FirebaseConfig.firestore_base_url()
-	_send(url, HTTPClient.METHOD_GET, "")
+	_dispatch("load_requests", url, HTTPClient.METHOD_GET, "", {}, [], {})
 
 func save_request(request_data: Dictionary) -> void:
 	if not _can_request():
 		return
 	var request_id := str(request_data.get("id", "REQ-%d" % Time.get_unix_time_from_system())).uri_encode()
-	_mode = "save_request"
-	_pending_request = request_data.duplicate(true)
 	var url := "%s/requests/%s" % [FirebaseConfig.firestore_base_url(), request_id]
-	_send(url, HTTPClient.METHOD_PATCH, JSON.stringify({"fields": _to_firestore_fields(request_data)}))
+	_dispatch("save_request", url, HTTPClient.METHOD_PATCH, JSON.stringify({"fields": _to_firestore_fields(request_data)}), request_data.duplicate(true), [], {})
 
 func save_requests(requests: Array) -> void:
 	_pending_requests = requests.duplicate(true)
@@ -77,55 +104,113 @@ func _save_requests_at_index(index: int) -> void:
 	if not (_pending_requests[index] is Dictionary):
 		_save_requests_at_index(index + 1)
 		return
-	_mode = "save_requests:%d" % index
-	_pending_request = (_pending_requests[index] as Dictionary).duplicate(true)
-	var request_id := str(_pending_request.get("id", "REQ-%d" % Time.get_unix_time_from_system())).uri_encode()
+	var request := (_pending_requests[index] as Dictionary).duplicate(true)
+	var request_id := str(request.get("id", "REQ-%d" % Time.get_unix_time_from_system())).uri_encode()
 	var url := "%s/requests/%s" % [FirebaseConfig.firestore_base_url(), request_id]
-	_send(url, HTTPClient.METHOD_PATCH, JSON.stringify({"fields": _to_firestore_fields(_pending_request)}))
+	_dispatch("save_requests:%d" % index, url, HTTPClient.METHOD_PATCH, JSON.stringify({"fields": _to_firestore_fields(request)}), request, _pending_requests.duplicate(true), {})
 
-func _can_request() -> bool:
+func _can_request(silent: bool = false) -> bool:
 	if not FirebaseConfig.is_configured():
-		firestore_failed.emit("FirebaseConfig.gd nu este completat.")
+		if not silent:
+			firestore_failed.emit("FirebaseConfig.gd nu este completat.")
 		return false
 	if _id_token.strip_edges() == "":
-		firestore_failed.emit("Nu există sesiune Firebase Auth activă.")
-		return false
-	if _http.get_http_client_status() != HTTPClient.STATUS_DISCONNECTED:
+		if not silent:
+			firestore_failed.emit("Nu există sesiune Firebase Auth activă.")
 		return false
 	return true
 
-func _send(url: String, method: HTTPClient.Method, body: String) -> void:
+func _dispatch(mode: String, url: String, method: int, body: String, pending_request: Dictionary = {}, pending_requests: Array = [], pending_profile: Dictionary = {}) -> void:
+	if mode == "load_requests":
+		for queued in _request_queue:
+			if queued is Dictionary and str((queued as Dictionary).get("mode", "")) == "load_requests":
+				return
+	var entry := {
+		"mode": mode,
+		"url": url,
+		"method": method,
+		"body": body,
+		"pending_request": pending_request.duplicate(true),
+		"pending_requests": pending_requests.duplicate(true),
+		"pending_profile": pending_profile.duplicate(true)
+	}
+	if _request_in_progress or _http.get_http_client_status() != HTTPClient.STATUS_DISCONNECTED:
+		_request_queue.append(entry)
+		return
+	_begin_dispatch(entry)
+
+func _begin_dispatch(entry: Dictionary) -> void:
+	_request_in_progress = true
+	_mode = str(entry.get("mode", ""))
+	_pending_request = (entry.get("pending_request", {}) as Dictionary).duplicate(true)
+	_pending_requests = (entry.get("pending_requests", []) as Array).duplicate(true)
+	_pending_profile = (entry.get("pending_profile", {}) as Dictionary).duplicate(true)
+	_send_raw(str(entry.get("url", "")), int(entry.get("method", HTTPClient.METHOD_GET)), str(entry.get("body", "")))
+
+func _send_raw(url: String, method: int, body: String) -> void:
 	var headers := PackedStringArray(["Content-Type: application/json", "Authorization: Bearer %s" % _id_token])
 	var err := _http.request(url, headers, method, body)
 	if err != OK:
+		_request_in_progress = false
 		firestore_failed.emit("Nu am putut porni cererea Firestore: %s" % str(err))
+		call_deferred("_run_next_queued_request")
+
+func _run_next_queued_request() -> void:
+	if _request_in_progress:
+		return
+	if _request_queue.is_empty():
+		return
+	if _http.get_http_client_status() != HTTPClient.STATUS_DISCONNECTED:
+		call_deferred("_run_next_queued_request")
+		return
+	var next_entry := _request_queue.pop_front() as Dictionary
+	_begin_dispatch(next_entry)
+
+func _finish_current_request() -> void:
+	_request_in_progress = false
+	call_deferred("_run_next_queued_request")
 
 func _on_request_completed(_result: int, response_code: int, _headers: PackedStringArray, body: PackedByteArray) -> void:
+	var current_mode := _mode
 	var raw := body.get_string_from_utf8()
 	var parsed: Variant = JSON.parse_string(raw)
-	if response_code == 404 and _mode == "load_user_profile":
+	if response_code == 404 and current_mode == "load_user_profile":
 		user_profile_loaded.emit({})
+		_finish_current_request()
 		return
 	if response_code < 200 or response_code >= 300:
 		firestore_failed.emit(_friendly_firestore_error(parsed, response_code))
+		_finish_current_request()
 		return
-	if _mode == "load_user_profile":
+	if current_mode == "load_user_profile":
 		var profile := _parse_single_document(parsed)
 		user_profile_loaded.emit(profile)
+		_finish_current_request()
 		return
-	if _mode == "save_user_profile":
+	if current_mode == "save_user_profile":
 		user_profile_saved.emit(_pending_profile.duplicate(true))
+		_finish_current_request()
 		return
-	if _mode == "load_requests":
+	if current_mode == "load_requests":
 		var requests := _parse_requests_list(parsed)
 		requests_loaded.emit(requests)
+		_finish_current_request()
 		return
-	if _mode == "save_request":
+	if current_mode == "save_request":
 		request_saved.emit(_pending_request.duplicate(true))
+		_finish_current_request()
+		if _requests_listener_running:
+			call_deferred("load_requests", true)
 		return
-	if _mode.begins_with("save_requests:"):
-		var index := int(_mode.get_slice(":", 1))
-		call_deferred("_save_requests_at_index", index + 1)
+	if current_mode.begins_with("save_requests:"):
+		var index := int(current_mode.get_slice(":", 1))
+		_finish_current_request()
+		if index >= _pending_requests.size() - 1 and _requests_listener_running:
+			call_deferred("load_requests", true)
+		else:
+			call_deferred("_save_requests_at_index", index + 1)
+		return
+	_finish_current_request()
 
 func _parse_single_document(parsed: Variant) -> Dictionary:
 	if parsed is Dictionary:

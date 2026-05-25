@@ -194,8 +194,8 @@ func _build_auth_screen(mode: String) -> void:
 	_password.secret = true
 	box.add_child(_password)
 
-	if _mode == "register" and _selected_account_type == "company":
-		_add_company_register_fields(box)
+	if _mode == "register":
+		_add_register_profile_fields(box)
 
 	var primary_text: String = "Intră în cont" if _mode == "login" else "Creează cont"
 	box.add_child(_auth_button(primary_text, true, func() -> void:
@@ -301,15 +301,16 @@ func _apply_tab_style(button: Button, selected: bool) -> void:
 	button.add_theme_stylebox_override("pressed", _style(fill, BLUE, 14, 0))
 	button.add_theme_stylebox_override("focus", StyleBoxEmpty.new())
 
-func _add_company_register_fields(box: VBoxContainer) -> void:
+func _add_register_profile_fields(box: VBoxContainer) -> void:
 	var section := Label.new()
-	section.text = "Date firmă"
+	section.text = "Date firmă" if _selected_account_type == "company" else "Date client"
 	section.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	section.add_theme_color_override("font_color", BLUE)
 	_apply_font(section, 14)
 	box.add_child(section)
 
-	_company_name = _create_line_input("Nume firmă / prestator")
+	var name_placeholder := "Nume firmă / prestator" if _selected_account_type == "company" else "Nume complet"
+	_company_name = _create_line_input(name_placeholder)
 	box.add_child(_company_name)
 
 	_company_phone = _create_line_input("Telefon contact")
@@ -369,31 +370,36 @@ func _submit_auth() -> void:
 
 	if _mode == "register":
 		var profile_data: Dictionary = _collect_extra_profile_data()
-		if _selected_account_type == "company" and not _validate_company_profile(profile_data):
+		if not _validate_register_profile(profile_data):
 			return
 		register_requested.emit(email_value, password_value, _selected_account_type, profile_data)
 	else:
 		login_requested.emit(email_value, password_value, _selected_account_type)
 
 func _collect_extra_profile_data() -> Dictionary:
-	if _selected_account_type != "company":
-		return {}
-
-	var company_name := _company_name.text.strip_edges() if is_instance_valid(_company_name) else ""
-	return {
-		"company_name": company_name,
-		"display_name": company_name,
-		"phone": _company_phone.text.strip_edges() if is_instance_valid(_company_phone) else ""
+	var name_value := _company_name.text.strip_edges() if is_instance_valid(_company_name) else ""
+	var phone_value := _company_phone.text.strip_edges() if is_instance_valid(_company_phone) else ""
+	var data := {
+		"display_name": name_value,
+		"phone": phone_value
 	}
+	if _selected_account_type == "company":
+		data["company_name"] = name_value
+	return data
 
-func _validate_company_profile(profile_data: Dictionary) -> bool:
-	if str(profile_data.get("company_name", "")).strip_edges() == "" or str(profile_data.get("phone", "")).strip_edges() == "":
-		set_status("Pentru firmă trebuie completate toate cele 4 câmpuri.", true)
+func _validate_register_profile(profile_data: Dictionary) -> bool:
+	var name_value := str(profile_data.get("display_name", "")).strip_edges()
+	var phone_value := str(profile_data.get("phone", "")).strip_edges()
+	if name_value == "" or phone_value == "":
+		if _selected_account_type == "company":
+			set_status("Pentru firmă trebuie completate toate cele 4 câmpuri.", true)
+		else:
+			set_status("Pentru client trebuie completate emailul, parola, numele și telefonul.", true)
 		return false
-	if str(profile_data.get("company_name", "")).length() < 2:
-		set_status("Scrie numele firmei sau al prestatorului.", true)
+	if name_value.length() < 2:
+		set_status("Scrie un nume valid.", true)
 		return false
-	if str(profile_data.get("phone", "")).length() < 6:
+	if phone_value.length() < 6:
 		set_status("Adaugă un număr de telefon valid.", true)
 		return false
 	return true

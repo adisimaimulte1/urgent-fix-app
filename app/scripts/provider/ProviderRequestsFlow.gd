@@ -16,7 +16,6 @@ const CARD := Color.WHITE
 const LOGO_PATH := "res://assets/icon/logo_cropped.png"
 const FALLBACK_LOGO_PATH := "res://assets/icon/adaptive_foreground.png"
 const DEMO_PHOTO_PATH := "res://app/assets/demo/plumbing_preview.png"
-const UF_KEYBOARD_AWARE_SCROLL_SCRIPT := preload("res://app/scripts/ui/UFKeyboardAwareScroll.gd")
 
 var _requests: Array = []
 var _time_filter := "Toate"
@@ -42,6 +41,13 @@ func setup(initial_requests: Array, scale_value: float = 1.0, app_font: Font = n
 		_rebuild()
 
 func refresh_view() -> void:
+	_rebuild()
+
+func update_requests(requests: Array) -> void:
+	var current_id := _selected_request_id
+	_requests = requests.duplicate(true)
+	if current_id.strip_edges() != "" and _request_by_id(current_id).is_empty():
+		_selected_request_id = ""
 	_rebuild()
 
 func _ready() -> void:
@@ -697,14 +703,10 @@ func _update_details_dots() -> void:
 
 func _media_textures(request: Dictionary) -> Array[Texture2D]:
 	var textures: Array[Texture2D] = []
-	var media: Variant = request.get("media", [])
-	if media is Array:
-		for item in media:
-			if item is Dictionary:
-				var path := str((item as Dictionary).get("path", ""))
-				var texture := _texture_from_path(path)
-				if texture != null:
-					textures.append(texture)
+	for item in _media_items_from_request(request):
+		var texture := _texture_from_media_item(item)
+		if texture != null:
+			textures.append(texture)
 	if textures.is_empty():
 		var demo := _load_texture(DEMO_PHOTO_PATH)
 		if demo != null:
@@ -856,24 +858,12 @@ func _show_proposal_popup(request_id: String) -> void:
 	dim.set_anchors_preset(Control.PRESET_FULL_RECT)
 	dim.mouse_filter = Control.MOUSE_FILTER_STOP
 	_notice_overlay.add_child(dim)
-	var scroll := UF_KEYBOARD_AWARE_SCROLL_SCRIPT.new()
-	scroll.name = "ProposalKeyboardScroll"
-	scroll.set_anchors_preset(Control.PRESET_FULL_RECT)
-	scroll.mouse_filter = Control.MOUSE_FILTER_PASS
-	scroll.follow_focus = true
-	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
-	_notice_overlay.add_child(scroll)
-	var scroll_body := VBoxContainer.new()
-	scroll_body.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	scroll_body.custom_minimum_size = get_viewport_rect().size
-	scroll.add_child(scroll_body)
 	var center := CenterContainer.new()
-	center.custom_minimum_size = get_viewport_rect().size
-	center.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	center.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	center.name = "ProposalPopupCenter"
+	center.set_anchors_preset(Control.PRESET_FULL_RECT)
 	center.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	scroll_body.add_child(center)
+	_notice_overlay.add_child(center)
+
 	var panel := PanelContainer.new()
 	panel.custom_minimum_size = Vector2(_dp(315), 0)
 	panel.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
@@ -1096,16 +1086,32 @@ func _short_payment(request: Dictionary) -> String:
 	return _work_status_label(request)
 
 func _first_media_texture(request: Dictionary) -> Texture2D:
-	var media: Variant = request.get("media", [])
-	if media is Array:
-		for item in media:
-			if item is Dictionary:
-				var path := str((item as Dictionary).get("path", ""))
-				var texture := _texture_from_path(path)
-				if texture != null:
-					return texture
+	for item in _media_items_from_request(request):
+		var texture := _texture_from_media_item(item)
+		if texture != null:
+			return texture
 	var demo := _load_texture(DEMO_PHOTO_PATH)
 	return demo
+
+func _media_items_from_request(request: Dictionary) -> Array[Dictionary]:
+	return _media_items_from_value(request.get("media", []))
+
+func _media_items_from_value(value: Variant) -> Array[Dictionary]:
+	var output: Array[Dictionary] = []
+	if value is Array:
+		for item in value:
+			if item is Dictionary:
+				output.append((item as Dictionary).duplicate(true))
+		return output
+	if value is Dictionary:
+		var media_map := value as Dictionary
+		var keys := media_map.keys()
+		keys.sort()
+		for key in keys:
+			var item: Variant = media_map[key]
+			if item is Dictionary:
+				output.append((item as Dictionary).duplicate(true))
+	return output
 
 func _load_texture(path: String) -> Texture2D:
 	if path.strip_edges() == "" or not ResourceLoader.exists(path):
@@ -1115,15 +1121,55 @@ func _load_texture(path: String) -> Texture2D:
 		return resource
 	return null
 
-func _texture_from_path(path: String) -> Texture2D:
-	if path.strip_edges() == "":
+func _texture_from_media_item(item: Dictionary) -> Texture2D:
+	var encoded := str(item.get("image_base64", "")).strip_edges()
+	if encoded == "":
 		return null
-	if path.begins_with("res://"):
-		return _load_texture(path)
-	var img := Image.new()
-	var err := img.load(path)
-	if err == OK and not img.is_empty():
-		return ImageTexture.create_from_image(img)
+	return _texture_from_base64_image(encoded, str(item.get("mime_type", "image/png")))
+
+func _texture_from_base64_image(encoded: String, mime_type: String = "") -> Texture2D:
+	var bytes: PackedByteArray = Marshalls.base64_to_raw(encoded)
+	if bytes.is_empty():
+		return null
+	var image := _image_from_bytes(bytes, _extension_from_mime(mime_type))
+	if image == null or image.is_empty():
+		return null
+	return ImageTexture.create_from_image(image)
+
+func _extension_from_mime(mime_type: String) -> String:
+	var cleaned := mime_type.strip_edges().to_lower()
+	match cleaned:
+		"image/jpeg", "image/jpg":
+			return "jpg"
+		"image/png":
+			return "png"
+		"image/webp":
+			return "webp"
+		"image/bmp":
+			return "bmp"
+		_:
+			return ""
+
+
+func _image_from_bytes(bytes: PackedByteArray, preferred_ext: String = "") -> Image:
+	var image := Image.new()
+	var loaders: Array[String] = []
+	match preferred_ext:
+		"png": loaders = ["png", "jpg", "webp", "bmp"]
+		"jpg", "jpeg": loaders = ["jpg", "png", "webp", "bmp"]
+		"webp": loaders = ["webp", "png", "jpg", "bmp"]
+		"bmp": loaders = ["bmp", "png", "jpg", "webp"]
+		_: loaders = ["jpg", "png", "webp", "bmp"]
+	for loader in loaders:
+		var err := OK
+		match loader:
+			"png": err = image.load_png_from_buffer(bytes)
+			"jpg": err = image.load_jpg_from_buffer(bytes)
+			"webp": err = image.load_webp_from_buffer(bytes)
+			"bmp": err = image.load_bmp_from_buffer(bytes)
+		if err == OK and not image.is_empty():
+			return image
+		image = Image.new()
 	return null
 
 func _request_by_id(request_id: String) -> Dictionary:
@@ -1183,10 +1229,14 @@ func _approve_close_delete(request_id: String) -> void:
 	var index := _find_request_index(request_id)
 	if index < 0:
 		return
-	_requests.remove_at(index)
+	var request := _requests[index] as Dictionary
+	request["status"] = "closed"
+	request["payment_status"] = "released"
+	request["closed_at"] = Time.get_datetime_string_from_system()
+	_requests[index] = request
 	_selected_request_id = ""
 	_emit_change(true)
-	_show_notice("Cerere închisă", "Clientul a aprobat lucrarea, plata a fost eliberată, iar cererea a fost ștearsă din lista disponibilă.")
+	_show_notice("Cerere închisă", "Clientul a aprobat lucrarea, plata a fost eliberată, iar cererea a fost ascunsă din lista disponibilă.")
 
 func _emit_change(rebuild_now: bool = true) -> void:
 	requests_changed.emit(_requests.duplicate(true))

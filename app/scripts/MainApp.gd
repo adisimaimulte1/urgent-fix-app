@@ -23,7 +23,11 @@ const FALLBACK_LOGO_PATH := "res://assets/icon/adaptive_foreground.png"
 const BACKGROUND_PATH := "res://assets/background/app_background.png"
 const DEMO_PHOTO_PATH := "res://app/assets/demo/plumbing_preview.png"
 const LOCAL_DB_PATH := "user://urgentfix_demo_data.json"
-const LOCAL_MEDIA_DIR := "user://urgentfix_media"
+const MEDIA_MAX_SIDE := 360
+const MEDIA_MIN_SIDE := 220
+const MEDIA_JPEG_QUALITY_START := 0.48
+const MEDIA_JPEG_QUALITY_MIN := 0.30
+const MEDIA_TARGET_BASE64_CHARS := 240000
 const LUCIDE_FILE_PLUS_PATH := "res://addons/lucide_icons/icons_png/file-plus-2_512.png"
 const LUCIDE_USER_ROUND_PATH := "res://addons/lucide_icons/icons_png/user-round_512.png"
 const LUCIDE_ARROW_RIGHT_PATH := "res://addons/lucide_icons/icons_png/arrow-right_512.png"
@@ -54,6 +58,7 @@ const UF_PILL_ICON_BUTTON_SCRIPT := preload("res://app/scripts/ui/UFPillIconButt
 const UF_GRADIENT_BACKGROUND_SCRIPT := preload("res://app/scripts/background/UFGradientBackground.gd")
 const UF_HILLS_BACKGROUND_SCRIPT := preload("res://app/scripts/background/UFHillsBackground.gd")
 const PROVIDER_REQUESTS_FLOW_SCRIPT := preload("res://app/scripts/provider/ProviderRequestsFlow.gd")
+const FIRESTORE_SERVICE_SCRIPT := preload("res://app/scripts/firebase/FirestoreService.gd")
 
 var _page_index := 0
 var _scale := 1.0
@@ -74,6 +79,11 @@ var _rebuild_pending := false
 var _app_font: Font
 var _auth_profile: Dictionary = {}
 var _account_type := "client"
+var _firestore_service: Node
+var _provider_flow: Control
+var _requests_loaded_from_db := false
+var _pending_request_sync := false
+var _requests_last_signature := ""
 var _form_data: Dictionary = {
 	"problem_category": "",
 	"other_issue": "",
@@ -101,6 +111,7 @@ var _description_counter: Label
 var _media_carousel_scroll: ScrollContainer
 var _media_carousel_dots: Array[PanelContainer] = []
 var _media_page_index := 0
+var _rounded_image_shader_cache: Shader
 var _saved_requests: Array = []
 var _permission_notice_overlay: Control
 var _initial_intro_pending := true
@@ -112,6 +123,8 @@ func set_auth_profile(profile: Dictionary) -> void:
 	_account_type = _normalize_account_type(str(_auth_profile.get("account_type", "client")))
 	set_meta("auth_profile", _auth_profile)
 	set_meta("account_type", _account_type)
+	_ensure_firestore_service()
+	_start_requests_database_listener()
 	if is_inside_tree() and is_instance_valid(_content):
 		_rebuild()
 
@@ -138,6 +151,7 @@ func _enter_tree() -> void:
 func _ready() -> void:
 	_load_font_if_available()
 	_load_local_data()
+	_ensure_firestore_service()
 	_rebuild()
 
 func _notification(what: int) -> void:
@@ -184,7 +198,8 @@ func _finish_rebuild() -> void:
 
 func _rebuild() -> void:
 	for c in get_children():
-		c.queue_free()
+		if c != _firestore_service:
+			c.queue_free()
 	_compute_scale()
 	var run_intro := _initial_intro_pending
 	_building_initial_intro = run_intro
@@ -237,41 +252,251 @@ func _load_local_data() -> void:
 	_reset_request_form()
 
 func _save_local_data() -> void:
-	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(LOCAL_MEDIA_DIR))
 	var file := FileAccess.open(LOCAL_DB_PATH, FileAccess.WRITE)
 	if file == null:
 		return
 	file.store_string(JSON.stringify({"requests": _saved_requests}, "\t"))
 
+func _ensure_firestore_service() -> void:
+	if is_instance_valid(_firestore_service):
+		return
+	_firestore_service = FIRESTORE_SERVICE_SCRIPT.new()
+	_firestore_service.name = "MainFirestoreService"
+	add_child(_firestore_service)
+	if _firestore_service.has_signal("requests_loaded"):
+		_firestore_service.requests_loaded.connect(_on_database_requests_loaded)
+	if _firestore_service.has_signal("request_saved"):
+		_firestore_service.request_saved.connect(_on_database_request_saved)
+	if _firestore_service.has_signal("requests_saved"):
+		_firestore_service.requests_saved.connect(_on_database_requests_saved)
+	if _firestore_service.has_signal("firestore_failed"):
+		_firestore_service.firestore_failed.connect(_on_database_error)
+
+func _start_requests_database_listener() -> void:
+	if not is_instance_valid(_firestore_service):
+		return
+	var token := str(_auth_profile.get("id_token", "")).strip_edges()
+	if token == "":
+		return
+	_firestore_service.set_id_token(token)
+	if _firestore_service.has_method("start_requests_listener"):
+		_firestore_service.start_requests_listener(1.5)
+	else:
+		_refresh_requests_from_database()
+
+func _refresh_requests_from_database() -> void:
+	if not is_instance_valid(_firestore_service):
+		return
+	var token := str(_auth_profile.get("id_token", "")).strip_edges()
+	if token == "":
+		return
+	_firestore_service.set_id_token(token)
+	if _firestore_service.has_method("load_requests"):
+		_firestore_service.load_requests()
+
+func _on_database_requests_loaded(requests: Array) -> void:
+	var next_signature := _requests_signature(requests)
+	if _requests_loaded_from_db and next_signature == _requests_last_signature:
+		return
+	_requests_loaded_from_db = true
+	_requests_last_signature = next_signature
+	_saved_requests = requests.duplicate(true)
+	_save_local_data()
+	_update_provider_flow_from_database()
+
+func _update_provider_flow_from_database() -> void:
+	if _page_index != 3:
+		return
+	if is_instance_valid(_provider_flow) and _provider_flow.has_method("update_requests"):
+		_provider_flow.update_requests(_visible_provider_requests())
+	elif is_instance_valid(_content):
+		_show_page(3, false)
+
+func _requests_signature(requests: Array) -> String:
+	var simple: Array = []
+	for item in requests:
+		if not (item is Dictionary):
+			continue
+		var request := item as Dictionary
+		simple.append({
+			"id": str(request.get("id", "")),
+			"status": str(request.get("status", "")),
+			"created_at": str(request.get("created_at", "")),
+			"updated_at": str(request.get("updated_at", "")),
+			"problem_category": str(request.get("problem_category", "")),
+			"urgency": str(request.get("urgency", "")),
+			"description": str(request.get("description", "")),
+			"provider_uid": str(request.get("provider_uid", "")),
+			"provider_message": str(request.get("provider_message", "")),
+			"proposed_amount": str(request.get("proposed_amount", "")),
+			"payment_status": str(request.get("payment_status", "")),
+			"media_signature": _media_signature(request.get("media", {}))
+		})
+	simple.sort_custom(func(a: Variant, b: Variant) -> bool:
+		return str((a as Dictionary).get("id", "")) < str((b as Dictionary).get("id", ""))
+	)
+	return JSON.stringify(simple)
+
+func _media_signature(value: Variant) -> String:
+	var items := _media_array_from_value(value)
+	var parts := PackedStringArray()
+	for item in items:
+		if not (item is Dictionary):
+			continue
+		var media := item as Dictionary
+		parts.append("%s:%s:%d" % [str(media.get("kind", "")), str(media.get("mime_type", "")), str(media.get("image_base64", "")).length()])
+	return "|".join(parts)
+
+func _on_database_request_saved(_request: Dictionary) -> void:
+	_pending_request_sync = false
+	_requests_last_signature = _requests_signature(_saved_requests)
+
+func _on_database_requests_saved(_requests: Array) -> void:
+	_pending_request_sync = false
+	_requests_last_signature = _requests_signature(_saved_requests)
+
+func _on_database_error(message: String) -> void:
+	_pending_request_sync = false
+	_show_small_notice("Database", message)
+
+func _save_request_to_database(request: Dictionary) -> void:
+	if not is_instance_valid(_firestore_service):
+		return
+	var token := str(_auth_profile.get("id_token", "")).strip_edges()
+	if token == "":
+		return
+	_pending_request_sync = true
+	_firestore_service.set_id_token(token)
+	_firestore_service.save_request(request)
+
+func _save_requests_to_database(requests: Array) -> void:
+	if not is_instance_valid(_firestore_service):
+		return
+	var token := str(_auth_profile.get("id_token", "")).strip_edges()
+	if token == "":
+		return
+	_pending_request_sync = true
+	_firestore_service.set_id_token(token)
+	_firestore_service.save_requests(requests)
+
 func _set_form_value(key: String, value: Variant) -> void:
 	_form_data[key] = value
 
 func _selected_media() -> Array:
-	var media: Variant = _form_data.get("media", [])
-	if media is Array:
-		return media
-	return []
+	return _media_array_from_value(_form_data.get("media", []))
 
-func _media_path_from_item(item: Variant) -> String:
+func _media_array_from_value(value: Variant) -> Array:
+	var output: Array = []
+	if value is Array:
+		for item in value:
+			if item is Dictionary:
+				output.append((item as Dictionary).duplicate(true))
+		return output
+	if value is Dictionary:
+		var media_map := value as Dictionary
+		var keys := media_map.keys()
+		keys.sort()
+		for key in keys:
+			var item: Variant = media_map[key]
+			if item is Dictionary:
+				output.append((item as Dictionary).duplicate(true))
+	return output
+
+func _media_storage_map(media: Array) -> Dictionary:
+	var output := {}
+	var output_index := 0
+	for item in media:
+		if item is Dictionary:
+			var normalized := _normalized_media_item_for_storage(item as Dictionary)
+			if not normalized.is_empty():
+				output[str(output_index)] = normalized
+				output_index += 1
+	return output
+
+func _normalized_media_item_for_storage(item: Dictionary) -> Dictionary:
+	var encoded := str(item.get("image_base64", "")).strip_edges()
+	if encoded == "":
+		return {}
+	var bytes: PackedByteArray = Marshalls.base64_to_raw(encoded)
+	if bytes.is_empty():
+		return {}
+	var image := _image_from_bytes(bytes, _extension_from_mime(str(item.get("mime_type", "image/png"))))
+	if image == null or image.is_empty():
+		return {}
+	var payload := _compressed_media_payload(image, str(item.get("kind", "photo")))
+	if payload.is_empty():
+		return {}
+	return payload
+
+func _media_base64_from_item(item: Variant) -> String:
 	if item is Dictionary:
-		return str(item.get("path", ""))
+		return str((item as Dictionary).get("image_base64", ""))
 	return ""
+
+func _media_mime_from_item(item: Variant) -> String:
+	if item is Dictionary:
+		return str((item as Dictionary).get("mime_type", "image/png"))
+	return "image/png"
 
 func _media_kind_from_item(item: Variant) -> String:
 	if item is Dictionary:
-		return str(item.get("kind", "photo"))
+		return str((item as Dictionary).get("kind", "photo"))
 	return "photo"
 
-func _add_media_item(path: String, kind: String) -> void:
-	if path.strip_edges() == "":
-		return
+func _add_media_image(image: Image, kind: String) -> bool:
+	if image == null or image.is_empty():
+		return false
+	var payload := _compressed_media_payload(image, kind)
+	if payload.is_empty():
+		return false
 	var media := _selected_media()
 	if media.size() >= 3:
 		media.remove_at(0)
-	media.append({"path": path, "kind": kind, "created_at": Time.get_datetime_string_from_system()})
+	media.append(payload)
 	_form_data["media"] = media
 	if _page_index == 2:
 		_show_page(2)
+	return true
+
+func _compressed_media_payload(source: Image, kind: String) -> Dictionary:
+	var base := _center_square_image(source)
+	if base == null or base.is_empty():
+		return {}
+	var side := mini(MEDIA_MAX_SIDE, mini(base.get_width(), base.get_height()))
+	var quality := MEDIA_JPEG_QUALITY_START
+	var best_payload := {}
+	while side >= MEDIA_MIN_SIDE:
+		quality = MEDIA_JPEG_QUALITY_START
+		while quality >= MEDIA_JPEG_QUALITY_MIN:
+			var encoded := _encode_jpeg_base64(base, side, quality)
+			if encoded.strip_edges() != "":
+				best_payload = {
+					"image_base64": encoded,
+					"mime_type": "image/jpeg",
+					"kind": kind,
+					"created_at": Time.get_datetime_string_from_system(),
+					"encoded_width": side,
+					"encoded_height": side,
+					"encoded_quality": quality
+				}
+				if encoded.length() <= MEDIA_TARGET_BASE64_CHARS:
+					return best_payload
+			quality -= 0.08
+		side = int(float(side) * 0.82)
+	return best_payload
+
+func _encode_jpeg_base64(source: Image, side: int, quality: float) -> String:
+	if source == null or source.is_empty():
+		return ""
+	var img := source.duplicate()
+	if img.get_width() != side or img.get_height() != side:
+		img.resize(side, side, Image.INTERPOLATE_LANCZOS)
+	if img.get_format() != Image.FORMAT_RGB8:
+		img.convert(Image.FORMAT_RGB8)
+	var bytes: PackedByteArray = img.save_jpg_to_buffer(clampf(quality, 0.0, 1.0))
+	if bytes.is_empty():
+		return ""
+	return Marshalls.raw_to_base64(bytes)
 
 func _remove_media_item(index: int) -> void:
 	var media := _selected_media()
@@ -281,41 +506,33 @@ func _remove_media_item(index: int) -> void:
 		if _page_index == 2:
 			_show_page(2)
 
-func _copy_file_to_local(source_path: String, kind: String) -> String:
-	if source_path.strip_edges() == "":
-		return ""
-	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(LOCAL_MEDIA_DIR))
-	var ext := source_path.get_extension().to_lower()
-	if ext == "":
-		ext = "png" if kind == "photo" else "mp4"
-	var target := "%s/%s_%d.%s" % [LOCAL_MEDIA_DIR, kind, Time.get_unix_time_from_system(), ext]
-	var bytes := FileAccess.get_file_as_bytes(source_path)
-	if bytes.is_empty():
-		return ""
-	var file := FileAccess.open(target, FileAccess.WRITE)
-	if file == null:
-		return ""
-	file.store_buffer(bytes)
-	return target
 
-func _texture_from_path(path: String) -> Texture2D:
-	if path.strip_edges() == "":
+
+func _texture_from_base64_image(encoded: String, mime_type: String = "") -> Texture2D:
+	var clean_encoded := encoded.strip_edges()
+	if clean_encoded == "":
 		return null
-	if path.begins_with("res://") and ResourceLoader.exists(path):
-		var tex: Variant = load(path)
-		if tex is Texture2D:
-			return tex
-	var img := Image.new()
-	var err := img.load(path)
-	if err == OK and not img.is_empty():
-		return ImageTexture.create_from_image(img)
-	var bytes := FileAccess.get_file_as_bytes(path)
+	var bytes: PackedByteArray = Marshalls.base64_to_raw(clean_encoded)
 	if bytes.is_empty():
 		return null
-	img = _image_from_bytes(bytes, path.get_extension().to_lower())
-	if img == null or img.is_empty():
+	var image := _image_from_bytes(bytes, _extension_from_mime(mime_type))
+	if image == null or image.is_empty():
 		return null
-	return ImageTexture.create_from_image(img)
+	return ImageTexture.create_from_image(image)
+
+func _extension_from_mime(mime_type: String) -> String:
+	var cleaned := mime_type.strip_edges().to_lower()
+	match cleaned:
+		"image/jpeg", "image/jpg":
+			return "jpg"
+		"image/png":
+			return "png"
+		"image/webp":
+			return "webp"
+		"image/bmp":
+			return "bmp"
+		_:
+			return ""
 
 func _image_from_bytes(bytes: PackedByteArray, preferred_ext: String = "") -> Image:
 	var image := Image.new()
@@ -354,28 +571,22 @@ func _on_gallery_picker_selected(status: bool, selected_paths: PackedStringArray
 	if not status or selected_paths.is_empty():
 		return
 	var source_path := selected_paths[0]
-	var saved := _copy_gallery_photo_to_local(source_path)
-	if saved != "":
-		_add_media_item(saved, "photo")
-	else:
-		_show_small_notice("Galerie", "Poza selectată nu a putut fi citită. Încearcă altă imagine din galerie.")
+	var image := _gallery_image_from_path(source_path)
+	if image != null and _add_media_image(image, "photo"):
+		return
+	_show_small_notice("Galerie", "Poza selectată nu a putut fi citită. Încearcă altă imagine din galerie.")
 
-func _copy_gallery_photo_to_local(source_path: String) -> String:
+func _gallery_image_from_path(source_path: String) -> Image:
 	if source_path.strip_edges() == "":
-		return ""
-	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(LOCAL_MEDIA_DIR))
-	var target := "%s/gallery_photo_%d.png" % [LOCAL_MEDIA_DIR, Time.get_unix_time_from_system()]
+		return null
 	var img := Image.new()
 	var load_error := img.load(source_path)
 	if load_error == OK and not img.is_empty():
-		return target if img.save_png(target) == OK else ""
-	var bytes := FileAccess.get_file_as_bytes(source_path)
+		return img
+	var bytes: PackedByteArray = FileAccess.get_file_as_bytes(source_path)
 	if bytes.is_empty():
-		return ""
-	var decoded := _image_from_bytes(bytes, source_path.get_extension().to_lower())
-	if decoded == null or decoded.is_empty():
-		return ""
-	return target if decoded.save_png(target) == OK else ""
+		return null
+	return _image_from_bytes(bytes, source_path.get_extension().to_lower())
 
 func _request_camera_permission_if_possible() -> bool:
 	if OS.has_method("request_permission"):
@@ -664,15 +875,10 @@ func _capture_native_camera_photo() -> void:
 	if _native_camera_last_image == null or _native_camera_last_image.is_empty():
 		_show_small_notice("Camera pornește", "Așteaptă o secundă să apară imaginea, apoi încearcă din nou.")
 		return
-	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(LOCAL_MEDIA_DIR))
-	var target := "%s/photo_%d.png" % [LOCAL_MEDIA_DIR, Time.get_unix_time_from_system()]
 	var captured_image := _center_square_image(_native_camera_last_image)
-	var save_error := captured_image.save_png(target)
 	_close_camera_capture(true)
-	if save_error == OK:
-		_add_media_item(target, "photo")
-	else:
-		_show_small_notice("Eroare salvare", "Poza a fost capturată, dar nu a putut fi salvată local.")
+	if not _add_media_image(captured_image, "photo"):
+		_show_small_notice("Eroare salvare", "Poza a fost capturată, dar nu a putut fi convertită în Base64.")
 
 func _center_square_image(source: Image) -> Image:
 	if source == null or source.is_empty():
@@ -990,22 +1196,105 @@ func _home() -> void:
 
 func _provider_requests() -> void:
 	_title.text = ""
-	var provider_flow := PROVIDER_REQUESTS_FLOW_SCRIPT.new()
+	_provider_flow = PROVIDER_REQUESTS_FLOW_SCRIPT.new()
+	var provider_flow := _provider_flow
 	provider_flow.set_anchors_preset(Control.PRESET_FULL_RECT)
 	provider_flow.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	provider_flow.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	provider_flow.custom_minimum_size = _content.size
-	provider_flow.setup(_saved_requests, _scale, _app_font)
+	provider_flow.setup(_visible_provider_requests(), _scale, _app_font)
 	provider_flow.back_requested.connect(func() -> void:
 		_history.clear()
 		_show_page(0)
 	)
 	provider_flow.requests_changed.connect(func(updated_requests: Array) -> void:
-		_saved_requests = updated_requests.duplicate(true)
-		_save_local_data()
+		_apply_provider_request_updates(updated_requests)
 	)
 	_content.add_child(provider_flow)
 	provider_flow.call_deferred("refresh_view")
+	if not _requests_loaded_from_db:
+		_refresh_requests_from_database()
+
+func _visible_provider_requests() -> Array:
+	var visible: Array = []
+	for item in _saved_requests:
+		if not (item is Dictionary):
+			continue
+		var request := item as Dictionary
+		var status := str(request.get("status", "public_waiting_provider"))
+		if status == "closed" or status == "deleted":
+			continue
+		visible.append(request.duplicate(true))
+	return visible
+
+func _apply_provider_request_updates(updated_requests: Array) -> void:
+	var by_id := {}
+	for item in updated_requests:
+		if item is Dictionary:
+			var request := (item as Dictionary).duplicate(true)
+			var id := str(request.get("id", ""))
+			if id != "":
+				request["updated_at"] = Time.get_datetime_string_from_system()
+				_stamp_provider_data(request)
+				by_id[id] = request
+
+	var changed_requests: Array = []
+	var merged: Array = []
+	var touched_ids := {}
+	for existing_item in _saved_requests:
+		if not (existing_item is Dictionary):
+			continue
+		var existing := existing_item as Dictionary
+		var existing_id := str(existing.get("id", ""))
+		if existing_id != "" and by_id.has(existing_id):
+			var next_request := (by_id[existing_id] as Dictionary).duplicate(true)
+			merged.append(next_request)
+			touched_ids[existing_id] = true
+			if _single_request_signature(existing) != _single_request_signature(next_request):
+				changed_requests.append(next_request.duplicate(true))
+		else:
+			merged.append(existing.duplicate(true))
+
+	for id in by_id.keys():
+		if not touched_ids.has(id):
+			var new_request := (by_id[id] as Dictionary).duplicate(true)
+			merged.append(new_request)
+			changed_requests.append(new_request.duplicate(true))
+
+	_saved_requests = merged
+	_requests_last_signature = _requests_signature(_saved_requests)
+	_save_local_data()
+	for request in changed_requests:
+		if request is Dictionary:
+			_save_request_to_database(request as Dictionary)
+
+func _single_request_signature(request: Dictionary) -> String:
+	return JSON.stringify({
+		"id": str(request.get("id", "")),
+		"status": str(request.get("status", "")),
+		"provider_uid": str(request.get("provider_uid", "")),
+		"provider_email": str(request.get("provider_email", "")),
+		"provider_name": str(request.get("provider_name", "")),
+		"provider_message": str(request.get("provider_message", "")),
+		"proposed_amount": str(request.get("proposed_amount", "")),
+		"payment_status": str(request.get("payment_status", "")),
+		"contract_signed": bool(request.get("contract_signed", false)),
+		"work_done": bool(request.get("work_done", false)),
+		"closed_at": str(request.get("closed_at", ""))
+	})
+
+func _stamp_provider_data(request: Dictionary) -> void:
+	if not _is_company_account():
+		return
+	var status := str(request.get("status", ""))
+	if status == "public_waiting_provider" or status == "":
+		return
+	request["provider_uid"] = str(_auth_profile.get("uid", request.get("provider_uid", "")))
+	request["provider_email"] = str(_auth_profile.get("email", request.get("provider_email", "")))
+	var provider_name := str(_auth_profile.get("display_name", _auth_profile.get("company_name", ""))).strip_edges()
+	if provider_name == "":
+		provider_name = str(_auth_profile.get("email", ""))
+	request["provider_name"] = provider_name
 
 func _problem() -> void:
 	_title.text = ""
@@ -1290,23 +1579,48 @@ func _finalize_request() -> void:
 		return
 	if str(_form_data.get("description", "")).strip_edges().length() == 0:
 		return
+	var now := Time.get_datetime_string_from_system()
+	var uid := str(_auth_profile.get("uid", "")).strip_edges()
 	var request := {
-		"id": "REQ-%d" % Time.get_unix_time_from_system(),
-		"created_at": Time.get_datetime_string_from_system(),
+		"id": "REQ-%d" % Time.get_ticks_msec(),
+		"created_at": now,
+		"updated_at": now,
+		"created_by_uid": uid,
+		"created_by_email": str(_auth_profile.get("email", "")),
+		"user_name": _request_profile_name(),
+		"user_phone": str(_auth_profile.get("phone", "")),
+		"account_type": "client",
 		"status": "public_waiting_provider",
+		"payment_status": "pending_offer",
+		"provider_uid": "",
+		"provider_email": "",
+		"provider_name": "",
+		"provider_message": "",
+		"proposed_amount": "",
 		"problem_category": str(_form_data.get("problem_category", "")),
 		"other_issue": str(_form_data.get("other_issue", "")),
 		"urgency": str(_form_data.get("urgency", "")),
 		"description": str(_form_data.get("description", "")),
-		"media": _selected_media().duplicate(true)
+		"media": _media_storage_map(_selected_media())
 	}
 	_saved_requests.append(request)
+	_requests_last_signature = _requests_signature(_saved_requests)
 	_reset_request_form()
 	_save_local_data()
+	_save_request_to_database(request)
 	_show_request_public_popup()
 
 func _reset_request_form() -> void:
 	_form_data = {"problem_category": "", "other_issue": "", "urgency": "", "description": "", "media": []}
+
+func _request_profile_name() -> String:
+	var display := str(_auth_profile.get("display_name", "")).strip_edges()
+	if display != "":
+		return display
+	var email := str(_auth_profile.get("email", "")).strip_edges()
+	if email.contains("@"):
+		return email.get_slice("@", 0)
+	return "Client local"
 
 func _confirm_leave_request() -> void:
 	_show_confirm_notice("Ieși din cerere?", "Dacă părăsești această pagină, cererea curentă nu va fi salvată.", "Rămâi", "Ieși", func() -> void:
@@ -1825,7 +2139,7 @@ func _media_preview_stack() -> Control:
 	var media := _selected_media()
 	if media.is_empty():
 		_media_page_index = 0
-		var empty_card := _media_preview_card("", "photo", -1)
+		var empty_card := _media_preview_card({}, -1)
 		empty_card.custom_minimum_size = Vector2(preview_size, preview_size)
 		row.add_child(empty_card)
 		return outer
@@ -1833,7 +2147,7 @@ func _media_preview_stack() -> Control:
 	_media_page_index = clampi(_media_page_index, 0, media.size() - 1)
 	for i in range(media.size()):
 		var item: Variant = media[i]
-		var card := _media_preview_card(_media_path_from_item(item), _media_kind_from_item(item), i)
+		var card := _media_preview_card(item, i)
 		card.custom_minimum_size = Vector2(preview_size, preview_size)
 		row.add_child(card)
 
@@ -1923,44 +2237,75 @@ func _update_media_dots() -> void:
 		dot.custom_minimum_size = Vector2(_dp(18 if active else 7), _dp(7))
 		dot.add_theme_stylebox_override("panel", _frame_style(FIX_GREEN if active else Color("#B8C8D8"), FIX_GREEN if active else Color("#B8C8D8"), 50, 0))
 
-func _video_thumbnail_from_metadata(path: String) -> Texture2D:
-	if path.strip_edges() == "" or not FileAccess.file_exists(path):
-		return null
-	var file := FileAccess.open(path, FileAccess.READ)
-	if file == null:
-		return null
-	var parsed: Variant = JSON.parse_string(file.get_as_text())
-	if not (parsed is Dictionary):
-		return null
-	var thumb_path := str((parsed as Dictionary).get("thumbnail", ""))
-	return _texture_from_path(thumb_path)
+func _rounded_media_image(texture: Texture2D, side: int, radius_px: int, border_width_px: int) -> ColorRect:
+	var image := ColorRect.new()
+	image.set_anchors_preset(Control.PRESET_FULL_RECT)
+	image.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	image.color = Color.WHITE
+	var material := ShaderMaterial.new()
+	material.shader = _rounded_image_shader()
+	material.set_shader_parameter("image_texture", texture)
+	material.set_shader_parameter("rect_size", Vector2(side, side))
+	material.set_shader_parameter("radius_px", float(radius_px))
+	material.set_shader_parameter("border_width_px", float(border_width_px))
+	material.set_shader_parameter("border_color", BLUE)
+	material.set_shader_parameter("bg_color", SOFT)
+	image.material = material
+	return image
 
-func _media_preview_card(path: String, kind: String, index: int) -> Control:
+func _rounded_image_shader() -> Shader:
+	if _rounded_image_shader_cache != null:
+		return _rounded_image_shader_cache
+	var shader := Shader.new()
+	shader.code = """
+shader_type canvas_item;
+uniform sampler2D image_texture;
+uniform vec4 border_color : source_color = vec4(0.01, 0.16, 0.43, 1.0);
+uniform vec4 bg_color : source_color = vec4(0.91, 0.99, 0.99, 1.0);
+uniform vec2 rect_size = vec2(100.0, 100.0);
+uniform float radius_px = 18.0;
+uniform float border_width_px = 3.0;
+
+float rounded_box(vec2 p, vec2 half_size, float radius) {
+	vec2 q = abs(p) - half_size + vec2(radius);
+	return length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0) - radius;
+}
+
+void fragment() {
+	vec2 p = (UV - vec2(0.5)) * rect_size;
+	float d = rounded_box(p, rect_size * 0.5, radius_px);
+	float alpha = 1.0 - smoothstep(0.0, 1.0, d);
+	vec4 sampled = texture(image_texture, UV);
+	vec4 base = mix(bg_color, sampled, sampled.a);
+	float border_mask = step(-border_width_px, d);
+	COLOR = mix(base, border_color, border_mask) * alpha;
+}
+"""
+	_rounded_image_shader_cache = shader
+	return _rounded_image_shader_cache
+
+func _media_preview_card(item: Variant, index: int) -> Control:
 	var preview_wrap := Control.new()
 	var preview_size := _media_preview_size()
 	preview_wrap.custom_minimum_size = Vector2(preview_size, preview_size)
 	preview_wrap.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	preview_wrap.mouse_filter = Control.MOUSE_FILTER_PASS
-	var panel := PanelContainer.new()
-	panel.set_anchors_preset(Control.PRESET_FULL_RECT)
-	panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	panel.clip_contents = true
-	panel.add_theme_stylebox_override("panel", _frame_style(Color("#E6EDF3"), Color("#C8D3DE"), 10, 1))
-	preview_wrap.add_child(panel)
 	var tex: Texture2D = null
+	var kind := _media_kind_from_item(item)
 	if kind == "photo":
-		tex = _texture_from_path(path)
-	else:
-		tex = _video_thumbnail_from_metadata(path)
+		tex = _texture_from_base64_image(_media_base64_from_item(item), _media_mime_from_item(item))
+	elif item is Dictionary:
+		var thumbnail_base64 := str((item as Dictionary).get("thumbnail_base64", ""))
+		tex = _texture_from_base64_image(thumbnail_base64, str((item as Dictionary).get("thumbnail_mime_type", "image/png")))
 	if tex != null:
-		var img := TextureRect.new()
-		img.set_anchors_preset(Control.PRESET_FULL_RECT)
-		img.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-		img.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
-		img.texture = tex
-		img.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		panel.add_child(img)
+		preview_wrap.add_child(_rounded_media_image(tex, preview_size, _dp(18), _dp(3)))
 	else:
+		var panel := PanelContainer.new()
+		panel.set_anchors_preset(Control.PRESET_FULL_RECT)
+		panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		panel.clip_contents = true
+		panel.add_theme_stylebox_override("panel", _frame_style(SOFT, BLUE, 18, 3))
+		preview_wrap.add_child(panel)
 		panel.add_child(_missing_media_label("Nicio imagine disponibila"))
 	if index >= 0:
 		var action := UF_ICON_CIRCLE_BUTTON_SCRIPT.new()
